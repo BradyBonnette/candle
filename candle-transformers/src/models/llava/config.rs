@@ -75,6 +75,7 @@ impl LLaVAConfig {
             bos_token_id: Some(self.bos_token_id as u32),
             eos_token_id: Some(self.eos_token_id as u32),
             use_flash_attn: false,
+            max_position_embeddings: self.max_position_embeddings,
         }
     }
 }

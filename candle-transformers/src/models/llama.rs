@@ -3,8 +3,6 @@ use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{embedding, Embedding, Module, VarBuilder};
 use std::collections::HashMap;
 
-pub const MAX_SEQ_LEN: usize = 4096;
-
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct LlamaConfig {
     pub hidden_size: usize,
@@ -18,6 +16,7 @@ pub struct LlamaConfig {
     pub rope_theta: f32,
     pub bos_token_id: Option<u32>,
     pub eos_token_id: Option<u32>,
+    pub max_position_embeddings: usize,
 }
 
 impl LlamaConfig {
@@ -44,6 +43,7 @@ impl LlamaConfig {
             use_flash_attn,
             bos_token_id: self.bos_token_id,
             eos_token_id: self.eos_token_id,
+            max_position_embeddings: self.max_position_embeddings,
         }
     }
 }
@@ -61,6 +61,7 @@ pub struct Config {
     pub rope_theta: f32,
     pub bos_token_id: Option<u32>,
     pub eos_token_id: Option<u32>,
+    pub max_position_embeddings: usize,
 }
 
 impl Config {
@@ -77,6 +78,7 @@ impl Config {
             rope_theta: 10_000.0,
             bos_token_id: None,
             eos_token_id: None,
+            max_position_embeddings: 4192,
         }
     }
 
@@ -93,6 +95,7 @@ impl Config {
             rope_theta: 10_000.0,
             bos_token_id: None,
             eos_token_id: None,
+            max_position_embeddings: 4192,
         }
     }
 }
@@ -116,9 +119,9 @@ impl Cache {
             .map(|i| 1f32 / config.rope_theta.powf(i as f32 / n_elem as f32))
             .collect();
         let theta = Tensor::new(theta.as_slice(), device)?;
-        let idx_theta = Tensor::arange(0, MAX_SEQ_LEN as u32, device)?
+        let idx_theta = Tensor::arange(0, config.max_position_embeddings as u32, device)?
             .to_dtype(DType::F32)?
-            .reshape((MAX_SEQ_LEN, 1))?
+            .reshape((config.max_position_embeddings, 1))?
             .matmul(&theta.reshape((1, theta.elem_count()))?)?;
         // This is different from the paper, see:
         // https://github.com/huggingface/transformers/blob/6112b1c6442aaf7affd2b0676a1cd4eee30c45cf/src/transformers/models/llama/modeling_llama.py#L112
@@ -160,6 +163,7 @@ struct CausalSelfAttention {
     use_flash_attn: bool,
     span: tracing::Span,
     span_rot: tracing::Span,
+    max_position_embeddings: usize,
 }
 
 #[cfg(feature = "flash-attn")]
@@ -220,15 +224,23 @@ impl CausalSelfAttention {
                 k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
                 v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
                 let k_seq_len = k.dims()[1];
-                if k_seq_len > MAX_SEQ_LEN {
+                if k_seq_len > self.max_position_embeddings {
                     k = k
-                        .narrow(D::Minus1, k_seq_len - MAX_SEQ_LEN, MAX_SEQ_LEN)?
+                        .narrow(
+                            D::Minus1,
+                            k_seq_len - self.max_position_embeddings,
+                            self.max_position_embeddings,
+                        )?
                         .contiguous()?
                 }
                 let v_seq_len = v.dims()[1];
-                if v_seq_len > 2 * MAX_SEQ_LEN {
+                if v_seq_len > 2 * self.max_position_embeddings {
                     v = v
-                        .narrow(D::Minus1, v_seq_len - MAX_SEQ_LEN, MAX_SEQ_LEN)?
+                        .narrow(
+                            D::Minus1,
+                            v_seq_len - self.max_position_embeddings,
+                            self.max_position_embeddings,
+                        )?
                         .contiguous()?
                 }
             }
@@ -291,6 +303,7 @@ impl CausalSelfAttention {
             use_flash_attn: cfg.use_flash_attn,
             span,
             span_rot,
+            max_position_embeddings: cfg.max_position_embeddings,
         })
     }
 }
