@@ -473,8 +473,8 @@ pub struct DebertaV2Attention {
 impl DebertaV2Attention {
     // pub fn load(vb: VarBuilder<'a>, config: &Config) -> candle::Result<Self> {
     pub fn load(vb: VarBuilder, config: &Config) -> candle::Result<Self> {
-        let dsa = DebertaV2DisentangledSelfAttention::load(vb.pp("self"), config)?;
-        let output = DebertaV2SelfOutput::load(vb.pp("output"), config)?;
+        let dsa = DebertaV2DisentangledSelfAttention::load(vb.pp("attention.self"), config)?;
+        let output = DebertaV2SelfOutput::load(vb.pp("attention.output"), config)?;
         Ok(Self {
             dsa,
             output,
@@ -521,8 +521,11 @@ pub struct DebertaV2Intermediate {
 
 impl DebertaV2Intermediate {
     pub fn load(vb: VarBuilder, config: &Config) -> candle::Result<Self> {
-        let dense =
-            candle_nn::linear(config.hidden_size, config.intermediate_size, vb.pp("dense"))?;
+        let dense = candle_nn::linear(
+            config.hidden_size,
+            config.intermediate_size,
+            vb.pp("intermediate.dense"),
+        )?;
         let intermediate_act = HiddenActLayer::new(config.hidden_act);
         Ok(Self {
             dense,
@@ -543,12 +546,15 @@ pub struct DebertaV2Output {
 
 impl DebertaV2Output {
     pub fn load(vb: VarBuilder, config: &Config) -> candle::Result<Self> {
-        let dense =
-            candle_nn::linear(config.intermediate_size, config.hidden_size, vb.pp("dense"))?;
+        let dense = candle_nn::linear(
+            config.intermediate_size,
+            config.hidden_size,
+            vb.pp("output.dense"),
+        )?;
         let layer_norm = candle_nn::layer_norm(
             config.hidden_size,
             config.layer_norm_eps,
-            vb.pp("LayerNorm"),
+            vb.pp("output.LayerNorm"),
         )?;
         let dropout = StableDropout::new(config.hidden_dropout_prob);
         Ok(Self {
