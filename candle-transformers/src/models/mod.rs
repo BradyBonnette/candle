@@ -8,6 +8,7 @@ pub mod clip;
 pub mod codegeex4_9b;
 pub mod convmixer;
 pub mod convnext;
+pub mod debertav2;
 pub mod depth_anything_v2;
 pub mod dinov2;
 pub mod dinov2reg4;
