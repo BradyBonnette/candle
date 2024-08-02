@@ -211,7 +211,9 @@ impl DebertaV2Embeddings {
 
         let dropout = StableDropout::new(config.hidden_dropout_prob);
 
-        let position_ids = Tensor::arange(0.0f32, config.max_position_embeddings as f32, &device)?;
+        // TEMP: Verified
+        let position_ids =
+            Tensor::arange(0, config.max_position_embeddings as u32, &device)?.unsqueeze(0)?;
 
         Ok(Self {
             word_embeddings,
@@ -232,7 +234,7 @@ impl DebertaV2Embeddings {
         input_ids: Option<&Tensor>,
         token_type_ids: Option<&Tensor>,
         position_ids: Option<&Tensor>,
-        mask: Option<&Tensor>,
+        mask: Option<Tensor>,
         inputs_embeds: Option<&Tensor>,
     ) -> candle::Result<Tensor> {
         let input_shape = match (input_ids, inputs_embeds) {
@@ -250,23 +252,38 @@ impl DebertaV2Embeddings {
             }
         };
 
+        // TEMP: Verified
         let seq_length = input_shape.last().unwrap().to_owned();
 
+        // TEMP: Verified
         let position_ids = match position_ids {
             Some(p) => p.to_owned(),
-            None => self.position_ids.narrow(0, 0, seq_length)?,
+            // None => self.position_ids.narrow(0, 0, seq_length)?,
+            None => self.position_ids.narrow(1, 0, seq_length)?,
         };
 
+        println!("position_ids dims: {:?}", position_ids.dims());
+        println!("position_ids: {}", position_ids.to_string());
+
+        // TEMP: Verified
         let token_type_ids = match token_type_ids {
             Some(t) => t.to_owned(),
-            None => Tensor::zeros(input_shape, DType::I64, &self.device)?,
+            None => Tensor::zeros(input_shape, DType::U32, &self.device)?,
         };
 
+        println!("token_type_ids dims: {:?}", token_type_ids.dims());
+        println!("token_type_ids: {}", token_type_ids.to_string());
+
+        // TEMP: Verified
         let input_embeds = match inputs_embeds {
             Some(e) => e.to_owned(),
             None => self.word_embeddings.forward(input_ids.unwrap())?,
         };
 
+        println!("input_embeds dims: {:?}", input_embeds.dims());
+        println!("input_embeds: {}", input_embeds.to_string());
+
+        // TEMP: Verified
         let position_embeddings = match &self.position_embeddings {
             Some(emb) => emb.forward(&position_ids)?,
             None => Tensor::zeros_like(&input_embeds)?,
@@ -274,42 +291,40 @@ impl DebertaV2Embeddings {
 
         let mut embeddings = input_embeds;
 
+        // TEMP: Verified, but skipped
         if self.config.position_biased_input {
             embeddings = embeddings.add(&position_embeddings)?;
         }
 
+        // TEMP: Verified, but skipped
         if self.config.type_vocab_size > 0 {
             let token_type_embeddings = self.token_type_embeddings.as_ref().unwrap();
             let token_type_embeddings = token_type_embeddings.forward(&token_type_ids)?;
             embeddings = embeddings.add(&token_type_embeddings)?;
         }
 
+        // TEMP: Verfieid, but skipped
         if self.embedding_size != self.config.hidden_size {
             embeddings = self.embed_proj.as_ref().unwrap().forward(&embeddings)?;
         }
 
+        // TEMP: Verified
         embeddings = self.layer_norm.forward(&embeddings)?;
 
-        // TODO: Figure this out \/
-        // if let Some(mut mask) = mask {
-        //     if mask.dims() != embeddings.dims() {
-        //         if mask.dims().len() == 4 {
-        //             let mut mask = &mask.squeeze(1)?;
-        //             mask = &mask.squeeze(1)?;
-        //         }
-        //         mask = &mask.unsqueeze(2)?;
+        // Temp: Verified
+        if let Some(mut mask) = mask {
+            if mask.dims() != embeddings.dims() {
+                if mask.dims().len() == 4 {
+                    mask = mask.squeeze(1)?.squeeze(1)?;
+                }
+                mask = mask.unsqueeze(2)?;
+            }
 
-        //         embeddings = embeddings.mul(mask)?;
-        //     }
-
-        //     // mask = mask.t
-
-        // }
+            mask = mask.to_dtype(embeddings.dtype())?;
+            embeddings = embeddings.broadcast_mul(&mask)?;
+        }
 
         embeddings = self.dropout.forward(embeddings)?;
-
-        let g = embeddings.dims();
-        println!("{}", embeddings.to_string());
 
         Ok(embeddings)
     }
@@ -733,15 +748,17 @@ impl DebertaV2Encoder {
     }
 }
 
-pub struct DebertaV2Model {
+pub struct DebertaV2Model<'vb> {
     embeddings: DebertaV2Embeddings,
     encoder: DebertaV2Encoder,
     z_steps: usize,
     config: Config,
+    vb: VarBuilder<'vb>,
 }
 
-impl DebertaV2Model {
-    pub fn load(vb: VarBuilder, config: &Config) -> candle::Result<Self> {
+impl<'vb> DebertaV2Model<'vb> {
+    pub fn load(vb: VarBuilder<'vb>, config: &Config) -> candle::Result<Self> {
+        let vb = vb.clone();
         let embeddings = DebertaV2Embeddings::load(vb.pp("embeddings"), config)?;
         let encoder = DebertaV2Encoder::load(vb.pp("encoder"), config)?;
         let z_steps: usize = 0;
@@ -751,18 +768,47 @@ impl DebertaV2Model {
             encoder,
             z_steps,
             config: config.clone(),
+            vb,
         })
     }
 
-    pub fn forward(&self, input_ids: &Tensor, token_type_ids: &Tensor) -> candle::Result<Tensor> {
-        // let embedding_output =
-        //     self.embeddings
-        //         .forward(Some(input_ids), Some(token_type_ids), None, None, None)?;
+    pub fn forward(
+        &self,
+        input_ids: &Tensor,
+        token_type_ids: Option<Tensor>,
+        attention_mask: Option<Tensor>,
+    ) -> candle::Result<Tensor> {
+        let input_ids_shape = input_ids.shape();
 
-        // let _enter = self.span.enter();
-        // let embedding_output = self.embeddings.forward(input_ids, token_type_ids)?;
-        // let sequence_output = self.encoder.forward(&embedding_output)?;
-        // Ok(sequence_output)
-        todo!()
+        let attention_mask = match attention_mask {
+            Some(mask) => mask,
+            // None => Tensor::ones(input_ids_shape, DType::U32, self.vb.device())?,
+            None => Tensor::ones(input_ids_shape, DType::I64, self.vb.device())?,
+        };
+
+        println!("Attention mask dims: {:?}", attention_mask.dims());
+        println!("Attention mask: {}", attention_mask.to_string());
+
+        let token_type_ids = match token_type_ids {
+            Some(ids) => ids,
+            // None => Tensor::zeros(input_ids_shape, DType::I64, self.vb.device())?,
+            None => Tensor::zeros(input_ids_shape, DType::U32, self.vb.device())?,
+        };
+
+        println!("Token type ids dims: {:?}", token_type_ids.dims());
+        println!("Token type ids: {}", attention_mask.to_string());
+
+        let embedding_output = self.embeddings.forward(
+            Some(input_ids),
+            Some(&token_type_ids),
+            None,
+            Some(attention_mask),
+            None,
+        )?;
+
+        println!("embedding output dims: {:?}", embedding_output.dims());
+        println!("embedding output: {}", embedding_output.to_string());
+
+        Ok(embedding_output)
     }
 }
