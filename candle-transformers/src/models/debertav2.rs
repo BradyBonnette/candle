@@ -1,12 +1,8 @@
-use candle::{
-    cuda::cudarc::driver::sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_SKIP_NVSCIBUF_MEMSYNC, DType, Device,
-    Module, Tensor,
-};
+use candle::{DType, Device, Module, Tensor, D};
 use candle_nn::{
-    conv1d, embedding, layer_norm, linear_b, Conv1d, Conv1dConfig, Embedding, LayerNorm, VarBuilder,
+    conv1d, embedding, layer_norm, Conv1d, Conv1dConfig, Embedding, LayerNorm, VarBuilder,
 };
 use serde::{Deserialize, Deserializer};
-
 pub const DTYPE: DType = DType::F32;
 
 // NOTE: HiddenAct and HiddenActLayer are both direct copies from bert.rs.
@@ -145,8 +141,13 @@ impl StableDropout {
         }
     }
 
-    pub fn forward(&self, x: Tensor) -> candle::Result<Tensor> {
-        Ok(x)
+    // pub fn forward(&self, x: Tensor) -> candle::Result<Tensor> {
+    pub fn forward(&self, x: Option<&Tensor>) -> candle::Result<Option<Tensor>> {
+        Ok(x.cloned())
+
+        // Ok(x)
+        // pub fn forward(&self, x: Option<&Tensor>) -> candle::Result<Tensor> {
+        // Ok(x.cloned())
     }
 }
 
@@ -234,7 +235,7 @@ impl DebertaV2Embeddings {
         input_ids: Option<&Tensor>,
         token_type_ids: Option<&Tensor>,
         position_ids: Option<&Tensor>,
-        mask: Option<Tensor>,
+        mask: Option<&Tensor>,
         inputs_embeds: Option<&Tensor>,
     ) -> candle::Result<Tensor> {
         let input_shape = match (input_ids, inputs_embeds) {
@@ -312,7 +313,8 @@ impl DebertaV2Embeddings {
         embeddings = self.layer_norm.forward(&embeddings)?;
 
         // Temp: Verified
-        if let Some(mut mask) = mask {
+        if let Some(mask) = mask {
+            let mut mask = mask.clone();
             if mask.dims() != embeddings.dims() {
                 if mask.dims().len() == 4 {
                     mask = mask.squeeze(1)?.squeeze(1)?;
@@ -324,7 +326,7 @@ impl DebertaV2Embeddings {
             embeddings = embeddings.broadcast_mul(&mask)?;
         }
 
-        embeddings = self.dropout.forward(embeddings)?;
+        embeddings = self.dropout.forward(Some(&embeddings))?.unwrap();
 
         Ok(embeddings)
     }
@@ -338,9 +340,10 @@ pub struct DebertaV2DisentangledSelfAttention {
     pub query_proj: candle_nn::Linear,
     pub key_proj: candle_nn::Linear,
     pub value_proj: candle_nn::Linear,
-    // pub vb: VarBuilder<'a>,
-    // pub vb: VarBuilder,
     pub dropout: StableDropout,
+    pub device: Device,
+    pub relative_attention: bool,
+    pub pos_dropout: Option<StableDropout>,
 }
 
 // impl<'a> DebertaV2DisentangledSelfAttention<'a> {
@@ -375,7 +378,7 @@ impl DebertaV2DisentangledSelfAttention {
 
         let mut pos_ebd_size: isize;
         let mut position_buckets = config.position_buckets.unwrap_or(-1);
-        let pos_dropout: Option<StableDropout>;
+        let mut pos_dropout: Option<StableDropout> = None;
         let mut pos_key_proj: Option<candle_nn::Linear> = None;
         let mut pos_query_proj: Option<candle_nn::Linear> = None;
 
@@ -409,6 +412,7 @@ impl DebertaV2DisentangledSelfAttention {
         }
 
         let dropout = StableDropout::new(config.attention_probs_dropout_prob);
+        let device = vb.device().clone();
 
         Ok(Self {
             config,
@@ -417,8 +421,10 @@ impl DebertaV2DisentangledSelfAttention {
             query_proj,
             key_proj,
             value_proj,
-            // vb,
             dropout,
+            device,
+            relative_attention,
+            pos_dropout,
         })
     }
 
@@ -426,7 +432,6 @@ impl DebertaV2DisentangledSelfAttention {
         &self,
         hidden_states: &Tensor,
         attention_mask: &Tensor,
-        output_attentions: bool,
         query_states: Option<&Tensor>,
         relative_pos: Option<&Tensor>,
         rel_embeddings: Option<&Tensor>,
@@ -436,11 +441,32 @@ impl DebertaV2DisentangledSelfAttention {
             None => hidden_states,
         };
 
-        let query_layer = self.transpose_for_scores(&self.query_proj.forward(query_states)?)?;
-        let key_layer = self.transpose_for_scores(&self.key_proj.forward(query_states)?)?;
-        let value_layer = self.transpose_for_scores(&self.value_proj.forward(query_states)?)?;
+        // println!(
+        //     "query_states: {:?}\n{}",
+        //     query_states.dims(),
+        //     query_states.to_string()
+        // );
 
-        let rel_att: Option<Tensor> = None;
+        let query_layer = self.transpose_for_scores(&self.query_proj.forward(query_states)?)?;
+        // println!(
+        //     "query_layer: {:?}\n{}",
+        //     query_layer.dims(),
+        //     query_layer.to_string()
+        // );
+        let key_layer = self.transpose_for_scores(&self.key_proj.forward(query_states)?)?;
+        // println!(
+        //     "key_layer: {:?}\n{}",
+        //     key_layer.dims(),
+        //     key_layer.to_string()
+        // );
+        let value_layer = self.transpose_for_scores(&self.value_proj.forward(query_states)?)?;
+        // println!(
+        //     "value_layer: {:?}\n{}",
+        //     value_layer.dims(),
+        //     value_layer.to_string()
+        // );
+
+        let mut rel_att: Option<Tensor> = None;
 
         let mut scale_factor: usize = 1;
 
@@ -452,8 +478,49 @@ impl DebertaV2DisentangledSelfAttention {
             scale_factor += 1;
         }
 
-        // let position_ids = Tensor::new(&position_ids[..], input_ids.device())?;
-        let dims = query_layer.dims().last().unwrap();
+        let scale = {
+            let q_size = query_layer.dims().last().unwrap();
+            Tensor::new(&[(q_size * scale_factor) as f32], &self.device)?.sqrt()?
+        };
+
+        let attention_scores = {
+            let key_layer_transposed = key_layer.transpose(D::Minus1, D::Minus2)?;
+            // println!(
+            //     "key_layer_transposed: {:?}\n{}",
+            //     key_layer_transposed.dims(),
+            //     key_layer_transposed.to_string()
+            // );
+            let div = key_layer_transposed
+                .broadcast_div(scale.to_dtype(query_layer.dtype())?.as_ref())?;
+            // println!("div: {:?}\n{}", div.dims(), div.to_string());
+            query_layer.matmul(&div)?
+        };
+
+        // println!(
+        //     "attention_scores: {:?}\n{}",
+        //     attention_scores.dims(),
+        //     attention_scores.to_string()
+        // );
+
+        if self.relative_attention {
+            let rel_embeddings = self
+                .pos_dropout
+                .as_ref()
+                .ok_or(candle::Error::Msg(
+                    "relative_attention requires pos_dropout".to_string(),
+                ))?
+                .forward(rel_embeddings)?
+                .unwrap();
+
+            rel_att = Some(self.disentangled_attention_bias(
+                query_layer,
+                key_layer,
+                relative_pos,
+                rel_embeddings,
+                scale_factor,
+            )?);
+        }
+
         // let scale = Tensor::new(query_layer[..], self.vb.device())?;
 
         // let scale = {
@@ -471,8 +538,25 @@ impl DebertaV2DisentangledSelfAttention {
         new_x_shape.pop();
         new_x_shape.push(self.num_attention_heads);
         new_x_shape.push(self.attention_head_size);
-        let xs = xs.reshape(new_x_shape.as_slice())?.transpose(1, 2)?;
-        xs.contiguous()
+        let mut xs = xs.reshape(new_x_shape.as_slice())?.transpose(1, 2)?;
+        xs = xs.contiguous()?;
+        xs.squeeze(0)
+    }
+
+    fn disentangled_attention_bias(
+        &self,
+        query_layer: Tensor,
+        key_layer: Tensor,
+        relative_pos: Option<&Tensor>,
+        rel_embeddings: Tensor,
+        scale_factor: usize,
+    ) -> candle::Result<Tensor> {
+        let mut relative_pos = relative_pos;
+        if relative_pos.is_none() {
+            let q = query_layer.dim(D::Minus2)?;
+            relative_pos = build_rel
+        }
+        todo!()
     }
 }
 
@@ -497,7 +581,27 @@ impl DebertaV2Attention {
         })
     }
 
-    pub fn forward(&self) -> candle::Result<Self> {
+    fn forward(
+        &self,
+        hidden_states: &Tensor,
+        attention_mask: &Tensor,
+        query_states: Option<&Tensor>,
+        relative_pos: Option<&Tensor>,
+        rel_embeddings: Option<&Tensor>,
+    ) -> candle::Result<Tensor> {
+        // &self,
+        // hidden_states: &Tensor,
+        // attention_mask: &Tensor,
+        // query_states: Option<&Tensor>,
+        // relative_pos: Option<&Tensor>,
+        // rel_embeddings: Option<&Tensor>,
+        let self_output = self.dsa.forward(
+            hidden_states,
+            &attention_mask,
+            query_states,
+            relative_pos,
+            rel_embeddings,
+        )?;
         todo!()
     }
 }
@@ -602,9 +706,27 @@ impl DebertaV2Layer {
         })
     }
 
-    pub fn forward(&self) -> candle::Result<Tensor> {
+    fn forward(
+        &self,
+        hidden_states: &Tensor,
+        attention_mask: &Tensor,
+        query_states: Option<&Tensor>,
+        relative_pos: Option<&Tensor>,
+        rel_embeddings: Option<&Tensor>,
+    ) -> candle::Result<Tensor> {
+        let attention_output = self.attention.forward(
+            hidden_states,
+            attention_mask,
+            query_states,
+            relative_pos,
+            rel_embeddings,
+        )?;
         todo!()
     }
+
+    // pub fn forward(&self) -> candle::Result<Tensor> {
+    //     todo!()
+    // }
 }
 
 pub struct ConvLayer {
@@ -667,6 +789,7 @@ pub struct DebertaV2Encoder {
     pub layer_norm: Option<LayerNorm>,
     pub conv: Option<ConvLayer>,
     pub gradient_checkpointing: bool,
+    pub device: Device,
 }
 
 impl DebertaV2Encoder {
@@ -734,18 +857,324 @@ impl DebertaV2Encoder {
             layer_norm,
             conv,
             gradient_checkpointing: false,
+            device: vb.device().clone(),
         })
     }
+    // pub fn forward(
+    //     &self,
+    //     input_ids: Option<&Tensor>,
+    //     token_type_ids: Option<&Tensor>,
+    //     position_ids: Option<&Tensor>,
+    //     mask: Option<&Tensor>,
+    //     inputs_embeds: Option<&Tensor>,
+    // ) -> candle::Result<Tensor> {
+    //     todo!()
+    // }
+    //  def forward(
+    //     self,
+    //     hidden_states,
+    //     attention_mask,
+    //     output_hidden_states=True,
+    //     output_attentions=False,
+    //     query_states=None,
+    //     relative_pos=None,
+    //     return_dict=True,
+    // ):
     pub fn forward(
         &self,
-        input_ids: Option<&Tensor>,
-        token_type_ids: Option<&Tensor>,
-        position_ids: Option<&Tensor>,
-        mask: Option<&Tensor>,
-        inputs_embeds: Option<&Tensor>,
+        hidden_states: &Tensor,
+        attention_mask: &Tensor,
+        query_states: Option<&Tensor>,
+        relative_pos: Option<&Tensor>,
     ) -> candle::Result<Tensor> {
+        let input_mask = if attention_mask.dims().len() <= 2 {
+            attention_mask.clone()
+        } else {
+            attention_mask
+                .sum_keepdim(attention_mask.rank() - 2)?
+                .gt(0.)?
+        };
+
+        let attention_mask = self.get_attention_mask(attention_mask.clone())?;
+        let relative_pos = self.get_rel_pos(hidden_states, query_states, relative_pos)?;
+
+        let next_kv = hidden_states;
+        let rel_embeddings = self.get_rel_embedding()?;
+        let mut output_states = next_kv.to_owned();
+
+        for (i, layer_module) in self.layer.iter().enumerate() {
+            // TODO: Ignoring output_hidden_states for now
+
+            // NOTE: The original python code branches here if this model is being
+            // used for training vs. inferencing. For now, we will only handle the
+            // inferencing side of things
+
+            output_states = layer_module.forward(
+                next_kv,
+                &attention_mask,
+                query_states,
+                relative_pos.as_ref(),
+                rel_embeddings.as_ref(),
+            )?;
+        }
+
         todo!()
     }
+
+    // TEMP: Verified
+    fn get_attention_mask(&self, mut attention_mask: Tensor) -> candle::Result<Tensor> {
+        if attention_mask.dims().len() <= 2 {
+            let extended_attention_mask = attention_mask.unsqueeze(1)?.unsqueeze(2)?;
+            attention_mask = extended_attention_mask.broadcast_mul(
+                &extended_attention_mask
+                    .squeeze(D::Minus2)?
+                    .unsqueeze(D::Minus1)?,
+            )?;
+        } else if attention_mask.dims().len() == 3 {
+            attention_mask = attention_mask.unsqueeze(1)?;
+        }
+
+        Ok(attention_mask)
+    }
+
+    fn get_rel_pos(
+        &self,
+        hidden_states: &Tensor,
+        query_states: Option<&Tensor>,
+        relative_pos: Option<&Tensor>,
+    ) -> candle::Result<Option<Tensor>> {
+        if self.relative_attention && relative_pos.is_none() {
+            let q = if let Some(query_states) = query_states {
+                query_states.dim(D::Minus2)?
+            } else {
+                hidden_states.dim(D::Minus2)?
+            };
+
+            return Ok(Some(self.build_relative_position(
+                q,
+                hidden_states.dim(D::Minus2)?,
+                Some(self.position_buckets),
+                Some(self.max_relative_positions),
+            )?));
+        }
+
+        if relative_pos.is_some() {
+            Ok(relative_pos.cloned())
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn build_relative_position(
+        &self,
+        query_size: usize,
+        key_size: usize,
+        bucket_size: Option<isize>,
+        max_position: Option<isize>,
+    ) -> candle::Result<Tensor> {
+        /*
+        let q_ids = Tensor::arange(0, query_size as i64, &self.device)?;
+        println!("q_ids: {:?}\n{}", q_ids, q_ids.to_string());
+
+        // let q_ids_u = q_ids.unsqueeze(1)?;
+        let q_ids_u = q_ids.unsqueeze(0)?;
+        println!("q_ids_u: {:?}\n{}", q_ids_u, q_ids_u.to_string());
+
+        let k_ids = Tensor::arange(0, key_size as i64, &self.device)?;
+        println!("k_ids: {:?}\n{}", k_ids, k_ids.to_string());
+
+        // let k_ids_u = k_ids.unsqueeze(0)?;
+        let k_ids_u = k_ids.unsqueeze(D::Minus1)?;
+        println!("k_ids_u: {:?}\n{}", k_ids_u, k_ids_u.to_string());
+
+        let temp = q_ids_u.broadcast_sub(&k_ids_u)?;
+        println!("temp: {:?}\n{}", temp, temp.to_string());
+
+        let mut rel_pos_ids = q_ids.broadcast_sub(&k_ids)?;
+        */
+
+        let q_ids = Tensor::arange(0, query_size as i64, &self.device)?.unsqueeze(0)?;
+        let k_ids: Tensor =
+            Tensor::arange(0, key_size as i64, &self.device)?.unsqueeze(D::Minus1)?;
+        // let mut rel_pos_ids = q_ids.broadcast_sub(&k_ids)?;
+        let mut rel_pos_ids = k_ids.broadcast_sub(&q_ids)?;
+        println!(
+            "real_pos_ids: {:?}\n{}",
+            rel_pos_ids,
+            rel_pos_ids.to_string()
+        );
+
+        let bucket_size = bucket_size.unwrap_or(-1);
+        let max_position = max_position.unwrap_or(-1);
+
+        // rel_pos_ids = make_log_bucket_position(rel_pos_ids, bucket_size, max_position)
+        if bucket_size > 0 && max_position > 0 {
+            rel_pos_ids = self.make_log_bucket_position(rel_pos_ids, bucket_size, max_position)?;
+        }
+
+        rel_pos_ids = rel_pos_ids.to_dtype(DType::I64)?;
+        // rel_pos_ids = rel_pos_ids.slice_assign(&[0..query_size, ..], src)?;
+
+        // let narrowed_rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
+        rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
+
+        println!(
+            "real_pos_ids narrow: {:?}\n{}",
+            rel_pos_ids,
+            rel_pos_ids.to_string()
+        );
+
+        rel_pos_ids = rel_pos_ids.unsqueeze(0)?;
+
+        println!(
+            "real_pos_ids unsqueeze: {:?}\n{}",
+            rel_pos_ids,
+            rel_pos_ids.to_string()
+        );
+
+        Ok(rel_pos_ids)
+    }
+
+    fn make_log_bucket_position(
+        &self,
+        relative_pos: Tensor,
+        bucket_size: isize,
+        max_position: isize,
+    ) -> candle::Result<Tensor> {
+        let sign = relative_pos
+            .to_dtype(DType::F32)?
+            .sign()?
+            .to_dtype(DType::I64)?; // TODO: This cast might be unnecessary
+
+        println!("sign: {:?}\n{}", sign, sign.to_string());
+
+        let mid = bucket_size / 2;
+
+        let lt_mid = relative_pos.lt(mid as i64)?;
+        let gt_neg_mid = relative_pos.gt(-mid as i64)?;
+
+        let condition = lt_mid
+            .to_dtype(candle::DType::F32)?
+            .mul(&gt_neg_mid.to_dtype(candle::DType::F32)?)?;
+
+        let condition_bool = condition.to_dtype(DType::U8)?;
+
+        println!(
+            "condition_bool: {:?}\n{}",
+            condition_bool,
+            condition_bool.to_string()
+        );
+
+        // let g = vec![(mid - 1)];
+
+        let on_true =
+            Tensor::new(&[(mid - 1) as u32], &self.device)?.broadcast_as(relative_pos.shape())?;
+
+        let on_true = on_true.to_dtype(relative_pos.dtype())?;
+
+        let on_false = relative_pos
+            .to_dtype(DType::F32)?
+            .abs()?
+            .to_dtype(DType::I64)?;
+
+        println!("on_true: {:?}\n{}", on_true, on_true.to_string());
+        println!("on_false: {:?}\n{}", on_false, on_false.to_string());
+
+        let abs_pos = condition_bool.where_cond(&on_true, &on_false)?;
+        /*
+        torch.ceil(
+            torch.log(abs_pos / mid) /
+            torch.log(
+                torch.tensor((max_position - 1) / mid)
+            )
+            * (mid - 1)
+        ) + mid
+         */
+
+        let mid_as_tensor = Tensor::from_slice(&[mid as f32], (1,), &self.device)?;
+
+        let log_pos = {
+            // let mid_as_tensor = Tensor::from_slice(&[mid as f32], (1,), &self.device)?;
+
+            let first_log = abs_pos
+                .to_dtype(DType::F32)?
+                .broadcast_div(&mid_as_tensor)?
+                .log()?;
+
+            println!("first_log: {:?}\n{}", first_log, first_log.to_string());
+
+            let second_log = Tensor::from_slice(
+                &[((max_position as f32 - 1.0) / mid as f32) as f32],
+                (1,),
+                &self.device,
+            )?
+            .log()?;
+
+            let first_div_second = first_log.broadcast_div(&second_log)?;
+
+            let to_ceil = first_div_second.broadcast_mul(
+                Tensor::from_slice(&[(mid - 1) as f32], (1,), &self.device)?.as_ref(),
+            )?;
+
+            let ceil = to_ceil.ceil()?;
+
+            println!("ceil: {:?}\n{}", ceil, ceil.to_string());
+
+            ceil.broadcast_add(&mid_as_tensor)?
+        };
+
+        println!("log_pos: {:?}\n{}", log_pos, log_pos.to_string());
+
+        let bucket_pos = {
+            let abs_pos_lte_mid = abs_pos.to_dtype(DType::F32)?.broadcast_le(&mid_as_tensor)?;
+            // println!(
+            //     "abs_pos_lte_mid: {:?}\n{}",
+            //     abs_pos_lte_mid,
+            //     abs_pos_lte_mid.to_string()
+            // );
+            let relative_pos = relative_pos.to_dtype(relative_pos.dtype())?;
+            // println!(
+            //     "relative_pos: {:?}\n{}",
+            //     relative_pos,
+            //     relative_pos.to_string()
+            // );
+            let log_pos_mul_sign = log_pos.broadcast_mul(&sign.to_dtype(DType::F32)?)?;
+            // println!(
+            //     "log_pos_mul_sign: {:?}\n{}",
+            //     log_pos_mul_sign,
+            //     log_pos_mul_sign.to_string()
+            // );
+
+            abs_pos_lte_mid.where_cond(&relative_pos.to_dtype(DType::F32)?, &log_pos_mul_sign)?
+        };
+        Ok(bucket_pos)
+    }
+
+    fn get_rel_embedding(&self) -> candle::Result<Option<Tensor>> {
+        // let rel_embeddings = self.rel_embeddings.unwrap().
+        let mut rel_embeddings: Option<Tensor>;
+
+        rel_embeddings = if self.relative_attention {
+            Some(self.rel_embeddings.as_ref().unwrap().embeddings().clone())
+        } else {
+            None
+        };
+
+        if rel_embeddings.is_some() && self.norm_rel_ebd.contains("layer_norm") {
+            rel_embeddings = Some(
+                self.layer_norm
+                    .as_ref()
+                    .unwrap()
+                    .forward(&rel_embeddings.unwrap())?,
+            );
+        };
+
+        Ok(rel_embeddings)
+    }
+
+    // fn make_log_bucket_position(&self) -> candle::Result<Tensor> {
+    //     todo!()
+    // }
 }
 
 pub struct DebertaV2Model<'vb> {
@@ -802,12 +1231,25 @@ impl<'vb> DebertaV2Model<'vb> {
             Some(input_ids),
             Some(&token_type_ids),
             None,
-            Some(attention_mask),
+            Some(&attention_mask),
             None,
         )?;
 
+        // &self,
+        // hidden_states: &Tensor,
+        // attention_mask: &Tensor,
+        // query_states: Option<Tensor>,
+        // relative_pos: Option<Tensor>,
+        let encoder_output =
+            self.encoder
+                .forward(&embedding_output, &attention_mask, None, None)?;
+
         println!("embedding output dims: {:?}", embedding_output.dims());
         println!("embedding output: {}", embedding_output.to_string());
+
+        if self.z_steps > 1 {
+            todo!("Copmlete DebertaV2Model forward() when z_steps > 1")
+        }
 
         Ok(embedding_output)
     }
