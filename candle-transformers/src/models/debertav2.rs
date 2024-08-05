@@ -1,3 +1,11 @@
+// TEMPORARY
+macro_rules! t {
+    ($name:expr, $tensor:expr) => {
+        println!("\n{}:\n{}", $name, $tensor.to_string());
+    };
+}
+// TEMPORARY
+
 use candle::{DType, Device, Module, Tensor, D};
 use candle_nn::{
     conv1d, embedding, layer_norm, Conv1d, Conv1dConfig, Embedding, LayerNorm, VarBuilder,
@@ -576,6 +584,8 @@ impl DebertaV2DisentangledSelfAttention {
             relative_pos.cloned().unwrap()
         };
 
+        t!("relative_pos", relative_pos);
+
         relative_pos = match relative_pos.dims().len() {
             2 => relative_pos.unsqueeze(0)?.unsqueeze(0)?,
             3 => relative_pos.unsqueeze(1)?,
@@ -586,9 +596,13 @@ impl DebertaV2DisentangledSelfAttention {
             }
         };
 
+        t!("relative_pos", relative_pos);
+
         let att_span = self.pos_ebd_size;
 
         relative_pos = relative_pos.to_dtype(DType::I64)?;
+
+        t!("relative_pos", relative_pos);
 
         // println!(
         //     "relative_pos: {:?}\n{}",
@@ -601,18 +615,26 @@ impl DebertaV2DisentangledSelfAttention {
             sliced.unsqueeze(0)?
         };
 
+        t!("rel_embeddings", rel_embeddings);
+
         let mut pos_query_layer: Option<Tensor> = None;
         let mut pos_key_layer: Option<Tensor> = None;
 
         let repeat_with = query_layer.dim(0)? / self.num_attention_heads;
         if self.share_att_key {
             let qproj = self.query_proj.forward(&rel_embeddings)?;
+            t!("qproj", qproj);
             let transposed = self.transpose_for_scores(&qproj)?;
+            t!("transposed", transposed);
             pos_query_layer = Some(transposed.repeat(repeat_with)?);
+            t!("pos_query_layer", pos_query_layer.as_ref().unwrap());
 
             let kproj = self.key_proj.forward(&rel_embeddings)?;
+            t!("kproj", kproj);
             let transposed = self.transpose_for_scores(&kproj)?;
+            t!("transposd", transposed);
             pos_key_layer = Some(transposed.repeat(repeat_with)?);
+            t!("pos_key_layer", pos_key_layer.as_ref().unwrap());
         } else {
             if self.config.pos_att_type.contains(&"c2p".to_string()) {
                 let kproj = self
@@ -640,6 +662,9 @@ impl DebertaV2DisentangledSelfAttention {
             }
         }
 
+        t!("pos_key_layer", pos_key_layer.as_ref().unwrap());
+        t!("pos_query_layer", pos_query_layer.as_ref().unwrap());
+
         let mut score = Tensor::new(&[0 as f32], &self.device)?;
 
         if self.config.pos_att_type.contains(&"c2p".to_string()) {
@@ -652,38 +677,58 @@ impl DebertaV2DisentangledSelfAttention {
                 Tensor::new(&[(layer_size * scale_factor) as f32], &self.device)?.sqrt()?
             };
 
+            t!("scale", scale);
+
             let mut c2p_att = {
                 let transposed = pos_key_layer.transpose(D::Minus1, D::Minus2)?;
                 query_layer.matmul(&transposed)?
             };
 
+            t!("c2p_att", c2p_att);
+
             let c2p_pos = {
-                let att_span_t = Tensor::new(&[att_span as f32], &self.device)?;
-                let rel_pos_plus_att_span = relative_pos.add(&att_span_t)?;
+                // let att_span_t = Tensor::new(&[att_span as f32], &self.device)?;
+                let att_span_t = Tensor::new(&[att_span as i64], &self.device)?;
+                let rel_pos_plus_att_span = relative_pos.broadcast_add(&att_span_t)?;
                 rel_pos_plus_att_span.clamp(0 as f32, (att_span * 2 - 1) as f32)?
             };
 
+            t!("c2p_pos", c2p_pos);
+
             c2p_att = {
-                let gather_idx = c2p_pos.squeeze(0)?.expand(&[
-                    query_layer.dim(0)?,
-                    query_layer.dim(1)?,
-                    relative_pos.dim(D::Minus1)?,
-                ])?;
+                let gather_idx = c2p_pos
+                    .squeeze(0)?
+                    .expand(&[
+                        query_layer.dim(0)?,
+                        query_layer.dim(1)?,
+                        relative_pos.dim(D::Minus1)?,
+                    ])?
+                    .contiguous()?;
+
+                t!("gather_idx", gather_idx);
 
                 c2p_att.gather(&gather_idx, D::Minus1)?
             };
 
-            score = c2p_att.broadcast_mul(scale.to_dtype(c2p_att.dtype())?.as_ref())?
+            t!("c2p_att", c2p_att);
+
+            score = score.broadcast_add(
+                &c2p_att.broadcast_div(scale.to_dtype(c2p_att.dtype())?.as_ref())?,
+            )?;
+
+            t!("score", score);
         }
 
         if self.config.pos_att_type.contains(&"p2c".to_string()) {
             let pos_query_layer = pos_query_layer.ok_or(candle::Error::Msg(
                 "content to position without pos_key_layer".to_string(),
             ))?;
+
             let scale = {
                 let layer_size = pos_query_layer.dim(D::Minus1)?;
                 Tensor::new(&[(layer_size * scale_factor) as f32], &self.device)?.sqrt()?
             };
+            t!("scale", scale);
 
             let r_pos = {
                 if key_layer.dim(D::Minus2)? != query_layer.dim(D::Minus2)? {
@@ -700,26 +745,45 @@ impl DebertaV2DisentangledSelfAttention {
                 }
             };
 
+            t!("r_pos", r_pos);
+
             let p2c_pos = {
                 let att_span_t = Tensor::new(&[att_span as f32], &self.device)?;
-                let to_clamp = r_pos.neg()?.broadcast_add(&att_span_t)?;
+                // let to_clamp = r_pos.neg()?.broadcast_add(&att_span_t)?;
+                let to_clamp = r_pos
+                    .to_dtype(DType::F32)?
+                    .neg()?
+                    .broadcast_add(&att_span_t)?;
+
+                t!("to_clamp", to_clamp);
                 to_clamp.clamp(0f32, (att_span * 2 - 1) as f32)?
             };
+
+            t!("p2c_pos", p2c_pos);
 
             let p2c_att = {
                 let transposed = pos_query_layer.transpose(D::Minus1, D::Minus2)?;
                 let bmm = key_layer.matmul(&transposed)?;
-                let gather_idx = p2c_pos.squeeze(0)?.expand(&[
-                    query_layer.dim(0)?,
-                    key_layer.dim(D::Minus2)?,
-                    key_layer.dim(D::Minus2)?,
-                ])?;
+                let gather_idx = p2c_pos
+                    .squeeze(0)?
+                    .expand(&[
+                        query_layer.dim(0)?,
+                        key_layer.dim(D::Minus2)?,
+                        key_layer.dim(D::Minus2)?,
+                    ])?
+                    .contiguous()?
+                    .to_dtype(DType::U32)?;
+                t!("gather_idx", gather_idx);
                 bmm.gather(&gather_idx, D::Minus1)?
                     .transpose(D::Minus1, D::Minus2)?
             };
 
+            t!("p2c_att", p2c_att);
+
             score =
                 score.broadcast_add(&p2c_att.broadcast_div(&scale.to_dtype(p2c_att.dtype())?)?)?;
+
+            t!("score", score);
         }
         // println!(
         //     "rel_embeddings: {:?}\n{}",
