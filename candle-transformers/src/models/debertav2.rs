@@ -344,6 +344,12 @@ pub struct DebertaV2DisentangledSelfAttention {
     pub device: Device,
     pub relative_attention: bool,
     pub pos_dropout: Option<StableDropout>,
+    pub position_buckets: isize,
+    pub max_relative_positions: isize,
+    pub pos_ebd_size: isize,
+    pub share_att_key: bool,
+    pub pos_key_proj: Option<candle_nn::Linear>,
+    pub pos_query_proj: Option<candle_nn::Linear>,
 }
 
 // impl<'a> DebertaV2DisentangledSelfAttention<'a> {
@@ -376,7 +382,7 @@ impl DebertaV2DisentangledSelfAttention {
         let relative_attention = config.relative_attention;
         let mut max_relative_positions = config.max_relative_positions;
 
-        let mut pos_ebd_size: isize;
+        let mut pos_ebd_size: isize = 0;
         let mut position_buckets = config.position_buckets.unwrap_or(-1);
         let mut pos_dropout: Option<StableDropout> = None;
         let mut pos_key_proj: Option<candle_nn::Linear> = None;
@@ -425,6 +431,12 @@ impl DebertaV2DisentangledSelfAttention {
             device,
             relative_attention,
             pos_dropout,
+            position_buckets,
+            max_relative_positions,
+            pos_ebd_size,
+            share_att_key,
+            pos_key_proj,
+            pos_query_proj,
         })
     }
 
@@ -551,12 +563,172 @@ impl DebertaV2DisentangledSelfAttention {
         rel_embeddings: Tensor,
         scale_factor: usize,
     ) -> candle::Result<Tensor> {
-        let mut relative_pos = relative_pos;
-        if relative_pos.is_none() {
+        let mut relative_pos: Tensor = if relative_pos.is_none() {
             let q = query_layer.dim(D::Minus2)?;
-            relative_pos = build_rel
+            build_relative_position(
+                q,
+                key_layer.dim(D::Minus2).unwrap(),
+                &self.device,
+                Some(self.position_buckets),
+                Some(self.max_relative_positions),
+            )?
+        } else {
+            relative_pos.cloned().unwrap()
+        };
+
+        relative_pos = match relative_pos.dims().len() {
+            2 => relative_pos.unsqueeze(0)?.unsqueeze(0)?,
+            3 => relative_pos.unsqueeze(1)?,
+            other => {
+                return Err(candle::Error::Msg(format!(
+                    "Relative position ids must be of dim 2 or 3 or 4. Got dim of size {other}"
+                )))
+            }
+        };
+
+        let att_span = self.pos_ebd_size;
+
+        relative_pos = relative_pos.to_dtype(DType::I64)?;
+
+        // println!(
+        //     "relative_pos: {:?}\n{}",
+        //     relative_pos.dims(),
+        //     relative_pos.to_string()
+        // );
+
+        let rel_embeddings = {
+            let sliced = rel_embeddings.narrow(0, 0, (att_span * 2) as usize)?;
+            sliced.unsqueeze(0)?
+        };
+
+        let mut pos_query_layer: Option<Tensor> = None;
+        let mut pos_key_layer: Option<Tensor> = None;
+
+        let repeat_with = query_layer.dim(0)? / self.num_attention_heads;
+        if self.share_att_key {
+            let qproj = self.query_proj.forward(&rel_embeddings)?;
+            let transposed = self.transpose_for_scores(&qproj)?;
+            pos_query_layer = Some(transposed.repeat(repeat_with)?);
+
+            let kproj = self.key_proj.forward(&rel_embeddings)?;
+            let transposed = self.transpose_for_scores(&kproj)?;
+            pos_key_layer = Some(transposed.repeat(repeat_with)?);
+        } else {
+            if self.config.pos_att_type.contains(&"c2p".to_string()) {
+                let kproj = self
+                    .pos_key_proj
+                    .as_ref()
+                    .ok_or(candle::Error::Msg(
+                        "Need a pos_key_proj when share_att_key is false or not specified"
+                            .to_string(),
+                    ))?
+                    .forward(&rel_embeddings)?;
+                let transposed = self.transpose_for_scores(&kproj)?;
+                pos_key_layer = Some(transposed.repeat(repeat_with)?);
+            }
+            if self.config.pos_att_type.contains(&"p2c".to_string()) {
+                let qproj = self
+                    .pos_query_proj
+                    .as_ref()
+                    .ok_or(candle::Error::Msg(
+                        "Need a pos_query_proj when share_att_key is false or not specified"
+                            .to_string(),
+                    ))?
+                    .forward(&rel_embeddings)?;
+                let transposed = self.transpose_for_scores(&qproj)?;
+                pos_query_layer = Some(transposed.repeat(repeat_with)?);
+            }
         }
-        todo!()
+
+        let mut score = Tensor::new(&[0 as f32], &self.device)?;
+
+        if self.config.pos_att_type.contains(&"c2p".to_string()) {
+            let pos_key_layer = pos_key_layer.ok_or(candle::Error::Msg(
+                "content to position without pos_key_layer".to_string(),
+            ))?;
+
+            let scale = {
+                let layer_size = pos_key_layer.dim(D::Minus1)?;
+                Tensor::new(&[(layer_size * scale_factor) as f32], &self.device)?.sqrt()?
+            };
+
+            let mut c2p_att = {
+                let transposed = pos_key_layer.transpose(D::Minus1, D::Minus2)?;
+                query_layer.matmul(&transposed)?
+            };
+
+            let c2p_pos = {
+                let att_span_t = Tensor::new(&[att_span as f32], &self.device)?;
+                let rel_pos_plus_att_span = relative_pos.add(&att_span_t)?;
+                rel_pos_plus_att_span.clamp(0 as f32, (att_span * 2 - 1) as f32)?
+            };
+
+            c2p_att = {
+                let gather_idx = c2p_pos.squeeze(0)?.expand(&[
+                    query_layer.dim(0)?,
+                    query_layer.dim(1)?,
+                    relative_pos.dim(D::Minus1)?,
+                ])?;
+
+                c2p_att.gather(&gather_idx, D::Minus1)?
+            };
+
+            score = c2p_att.broadcast_mul(scale.to_dtype(c2p_att.dtype())?.as_ref())?
+        }
+
+        if self.config.pos_att_type.contains(&"p2c".to_string()) {
+            let pos_query_layer = pos_query_layer.ok_or(candle::Error::Msg(
+                "content to position without pos_key_layer".to_string(),
+            ))?;
+            let scale = {
+                let layer_size = pos_query_layer.dim(D::Minus1)?;
+                Tensor::new(&[(layer_size * scale_factor) as f32], &self.device)?.sqrt()?
+            };
+
+            let r_pos = {
+                if key_layer.dim(D::Minus2)? != query_layer.dim(D::Minus2)? {
+                    build_relative_position(
+                        key_layer.dim(D::Minus2)?,
+                        key_layer.dim(D::Minus2)?,
+                        &self.device,
+                        Some(self.position_buckets),
+                        Some(self.max_relative_positions),
+                    )?
+                    .unsqueeze(0)?
+                } else {
+                    relative_pos
+                }
+            };
+
+            let p2c_pos = {
+                let att_span_t = Tensor::new(&[att_span as f32], &self.device)?;
+                let to_clamp = r_pos.neg()?.broadcast_add(&att_span_t)?;
+                to_clamp.clamp(0f32, (att_span * 2 - 1) as f32)?
+            };
+
+            let p2c_att = {
+                let transposed = pos_query_layer.transpose(D::Minus1, D::Minus2)?;
+                let bmm = key_layer.matmul(&transposed)?;
+                let gather_idx = p2c_pos.squeeze(0)?.expand(&[
+                    query_layer.dim(0)?,
+                    key_layer.dim(D::Minus2)?,
+                    key_layer.dim(D::Minus2)?,
+                ])?;
+                bmm.gather(&gather_idx, D::Minus1)?
+                    .transpose(D::Minus1, D::Minus2)?
+            };
+
+            score =
+                score.broadcast_add(&p2c_att.broadcast_div(&scale.to_dtype(p2c_att.dtype())?)?)?;
+        }
+        // println!(
+        //     "rel_embeddings: {:?}\n{}",
+        //     rel_embeddings.dims(),
+        //     rel_embeddings.to_string()
+        // );
+
+        // todo!()
+        Ok(score)
     }
 }
 
@@ -950,9 +1122,10 @@ impl DebertaV2Encoder {
                 hidden_states.dim(D::Minus2)?
             };
 
-            return Ok(Some(self.build_relative_position(
+            return Ok(Some(build_relative_position(
                 q,
                 hidden_states.dim(D::Minus2)?,
+                &self.device,
                 Some(self.position_buckets),
                 Some(self.max_relative_positions),
             )?));
@@ -964,192 +1137,6 @@ impl DebertaV2Encoder {
             Ok(None)
         }
     }
-
-    fn build_relative_position(
-        &self,
-        query_size: usize,
-        key_size: usize,
-        bucket_size: Option<isize>,
-        max_position: Option<isize>,
-    ) -> candle::Result<Tensor> {
-        /*
-        let q_ids = Tensor::arange(0, query_size as i64, &self.device)?;
-        println!("q_ids: {:?}\n{}", q_ids, q_ids.to_string());
-
-        // let q_ids_u = q_ids.unsqueeze(1)?;
-        let q_ids_u = q_ids.unsqueeze(0)?;
-        println!("q_ids_u: {:?}\n{}", q_ids_u, q_ids_u.to_string());
-
-        let k_ids = Tensor::arange(0, key_size as i64, &self.device)?;
-        println!("k_ids: {:?}\n{}", k_ids, k_ids.to_string());
-
-        // let k_ids_u = k_ids.unsqueeze(0)?;
-        let k_ids_u = k_ids.unsqueeze(D::Minus1)?;
-        println!("k_ids_u: {:?}\n{}", k_ids_u, k_ids_u.to_string());
-
-        let temp = q_ids_u.broadcast_sub(&k_ids_u)?;
-        println!("temp: {:?}\n{}", temp, temp.to_string());
-
-        let mut rel_pos_ids = q_ids.broadcast_sub(&k_ids)?;
-        */
-
-        let q_ids = Tensor::arange(0, query_size as i64, &self.device)?.unsqueeze(0)?;
-        let k_ids: Tensor =
-            Tensor::arange(0, key_size as i64, &self.device)?.unsqueeze(D::Minus1)?;
-        // let mut rel_pos_ids = q_ids.broadcast_sub(&k_ids)?;
-        let mut rel_pos_ids = k_ids.broadcast_sub(&q_ids)?;
-        println!(
-            "real_pos_ids: {:?}\n{}",
-            rel_pos_ids,
-            rel_pos_ids.to_string()
-        );
-
-        let bucket_size = bucket_size.unwrap_or(-1);
-        let max_position = max_position.unwrap_or(-1);
-
-        // rel_pos_ids = make_log_bucket_position(rel_pos_ids, bucket_size, max_position)
-        if bucket_size > 0 && max_position > 0 {
-            rel_pos_ids = self.make_log_bucket_position(rel_pos_ids, bucket_size, max_position)?;
-        }
-
-        rel_pos_ids = rel_pos_ids.to_dtype(DType::I64)?;
-        // rel_pos_ids = rel_pos_ids.slice_assign(&[0..query_size, ..], src)?;
-
-        // let narrowed_rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
-        rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
-
-        println!(
-            "real_pos_ids narrow: {:?}\n{}",
-            rel_pos_ids,
-            rel_pos_ids.to_string()
-        );
-
-        rel_pos_ids = rel_pos_ids.unsqueeze(0)?;
-
-        println!(
-            "real_pos_ids unsqueeze: {:?}\n{}",
-            rel_pos_ids,
-            rel_pos_ids.to_string()
-        );
-
-        Ok(rel_pos_ids)
-    }
-
-    fn make_log_bucket_position(
-        &self,
-        relative_pos: Tensor,
-        bucket_size: isize,
-        max_position: isize,
-    ) -> candle::Result<Tensor> {
-        let sign = relative_pos
-            .to_dtype(DType::F32)?
-            .sign()?
-            .to_dtype(DType::I64)?; // TODO: This cast might be unnecessary
-
-        println!("sign: {:?}\n{}", sign, sign.to_string());
-
-        let mid = bucket_size / 2;
-
-        let lt_mid = relative_pos.lt(mid as i64)?;
-        let gt_neg_mid = relative_pos.gt(-mid as i64)?;
-
-        let condition = lt_mid
-            .to_dtype(candle::DType::F32)?
-            .mul(&gt_neg_mid.to_dtype(candle::DType::F32)?)?;
-
-        let condition_bool = condition.to_dtype(DType::U8)?;
-
-        println!(
-            "condition_bool: {:?}\n{}",
-            condition_bool,
-            condition_bool.to_string()
-        );
-
-        // let g = vec![(mid - 1)];
-
-        let on_true =
-            Tensor::new(&[(mid - 1) as u32], &self.device)?.broadcast_as(relative_pos.shape())?;
-
-        let on_true = on_true.to_dtype(relative_pos.dtype())?;
-
-        let on_false = relative_pos
-            .to_dtype(DType::F32)?
-            .abs()?
-            .to_dtype(DType::I64)?;
-
-        println!("on_true: {:?}\n{}", on_true, on_true.to_string());
-        println!("on_false: {:?}\n{}", on_false, on_false.to_string());
-
-        let abs_pos = condition_bool.where_cond(&on_true, &on_false)?;
-        /*
-        torch.ceil(
-            torch.log(abs_pos / mid) /
-            torch.log(
-                torch.tensor((max_position - 1) / mid)
-            )
-            * (mid - 1)
-        ) + mid
-         */
-
-        let mid_as_tensor = Tensor::from_slice(&[mid as f32], (1,), &self.device)?;
-
-        let log_pos = {
-            // let mid_as_tensor = Tensor::from_slice(&[mid as f32], (1,), &self.device)?;
-
-            let first_log = abs_pos
-                .to_dtype(DType::F32)?
-                .broadcast_div(&mid_as_tensor)?
-                .log()?;
-
-            println!("first_log: {:?}\n{}", first_log, first_log.to_string());
-
-            let second_log = Tensor::from_slice(
-                &[((max_position as f32 - 1.0) / mid as f32) as f32],
-                (1,),
-                &self.device,
-            )?
-            .log()?;
-
-            let first_div_second = first_log.broadcast_div(&second_log)?;
-
-            let to_ceil = first_div_second.broadcast_mul(
-                Tensor::from_slice(&[(mid - 1) as f32], (1,), &self.device)?.as_ref(),
-            )?;
-
-            let ceil = to_ceil.ceil()?;
-
-            println!("ceil: {:?}\n{}", ceil, ceil.to_string());
-
-            ceil.broadcast_add(&mid_as_tensor)?
-        };
-
-        println!("log_pos: {:?}\n{}", log_pos, log_pos.to_string());
-
-        let bucket_pos = {
-            let abs_pos_lte_mid = abs_pos.to_dtype(DType::F32)?.broadcast_le(&mid_as_tensor)?;
-            // println!(
-            //     "abs_pos_lte_mid: {:?}\n{}",
-            //     abs_pos_lte_mid,
-            //     abs_pos_lte_mid.to_string()
-            // );
-            let relative_pos = relative_pos.to_dtype(relative_pos.dtype())?;
-            // println!(
-            //     "relative_pos: {:?}\n{}",
-            //     relative_pos,
-            //     relative_pos.to_string()
-            // );
-            let log_pos_mul_sign = log_pos.broadcast_mul(&sign.to_dtype(DType::F32)?)?;
-            // println!(
-            //     "log_pos_mul_sign: {:?}\n{}",
-            //     log_pos_mul_sign,
-            //     log_pos_mul_sign.to_string()
-            // );
-
-            abs_pos_lte_mid.where_cond(&relative_pos.to_dtype(DType::F32)?, &log_pos_mul_sign)?
-        };
-        Ok(bucket_pos)
-    }
-
     fn get_rel_embedding(&self) -> candle::Result<Option<Tensor>> {
         // let rel_embeddings = self.rel_embeddings.unwrap().
         let mut rel_embeddings: Option<Tensor>;
@@ -1253,4 +1240,186 @@ impl<'vb> DebertaV2Model<'vb> {
 
         Ok(embedding_output)
     }
+}
+
+pub(crate) fn build_relative_position(
+    query_size: usize,
+    key_size: usize,
+    device: &Device,
+    bucket_size: Option<isize>,
+    max_position: Option<isize>,
+) -> candle::Result<Tensor> {
+    /*
+    let q_ids = Tensor::arange(0, query_size as i64, &self.device)?;
+    println!("q_ids: {:?}\n{}", q_ids, q_ids.to_string());
+
+    // let q_ids_u = q_ids.unsqueeze(1)?;
+    let q_ids_u = q_ids.unsqueeze(0)?;
+    println!("q_ids_u: {:?}\n{}", q_ids_u, q_ids_u.to_string());
+
+    let k_ids = Tensor::arange(0, key_size as i64, &self.device)?;
+    println!("k_ids: {:?}\n{}", k_ids, k_ids.to_string());
+
+    // let k_ids_u = k_ids.unsqueeze(0)?;
+    let k_ids_u = k_ids.unsqueeze(D::Minus1)?;
+    println!("k_ids_u: {:?}\n{}", k_ids_u, k_ids_u.to_string());
+
+    let temp = q_ids_u.broadcast_sub(&k_ids_u)?;
+    println!("temp: {:?}\n{}", temp, temp.to_string());
+
+    let mut rel_pos_ids = q_ids.broadcast_sub(&k_ids)?;
+    */
+
+    let q_ids = Tensor::arange(0, query_size as i64, device)?.unsqueeze(0)?;
+    let k_ids: Tensor = Tensor::arange(0, key_size as i64, device)?.unsqueeze(D::Minus1)?;
+    // let mut rel_pos_ids = q_ids.broadcast_sub(&k_ids)?;
+    let mut rel_pos_ids = k_ids.broadcast_sub(&q_ids)?;
+    println!(
+        "real_pos_ids: {:?}\n{}",
+        rel_pos_ids,
+        rel_pos_ids.to_string()
+    );
+
+    let bucket_size = bucket_size.unwrap_or(-1);
+    let max_position = max_position.unwrap_or(-1);
+
+    // rel_pos_ids = make_log_bucket_position(rel_pos_ids, bucket_size, max_position)
+    if bucket_size > 0 && max_position > 0 {
+        rel_pos_ids = make_log_bucket_position(rel_pos_ids, bucket_size, max_position, device)?;
+    }
+
+    rel_pos_ids = rel_pos_ids.to_dtype(DType::I64)?;
+    // rel_pos_ids = rel_pos_ids.slice_assign(&[0..query_size, ..], src)?;
+
+    // let narrowed_rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
+    rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
+
+    println!(
+        "real_pos_ids narrow: {:?}\n{}",
+        rel_pos_ids,
+        rel_pos_ids.to_string()
+    );
+
+    rel_pos_ids = rel_pos_ids.unsqueeze(0)?;
+
+    println!(
+        "real_pos_ids unsqueeze: {:?}\n{}",
+        rel_pos_ids,
+        rel_pos_ids.to_string()
+    );
+
+    Ok(rel_pos_ids)
+}
+
+pub(crate) fn make_log_bucket_position(
+    relative_pos: Tensor,
+    bucket_size: isize,
+    max_position: isize,
+    device: &Device,
+) -> candle::Result<Tensor> {
+    let sign = relative_pos
+        .to_dtype(DType::F32)?
+        .sign()?
+        .to_dtype(DType::I64)?; // TODO: This cast might be unnecessary
+
+    println!("sign: {:?}\n{}", sign, sign.to_string());
+
+    let mid = bucket_size / 2;
+
+    let lt_mid = relative_pos.lt(mid as i64)?;
+    let gt_neg_mid = relative_pos.gt(-mid as i64)?;
+
+    let condition = lt_mid
+        .to_dtype(candle::DType::F32)?
+        .mul(&gt_neg_mid.to_dtype(candle::DType::F32)?)?;
+
+    let condition_bool = condition.to_dtype(DType::U8)?;
+
+    println!(
+        "condition_bool: {:?}\n{}",
+        condition_bool,
+        condition_bool.to_string()
+    );
+
+    // let g = vec![(mid - 1)];
+
+    let on_true = Tensor::new(&[(mid - 1) as u32], device)?.broadcast_as(relative_pos.shape())?;
+
+    let on_true = on_true.to_dtype(relative_pos.dtype())?;
+
+    let on_false = relative_pos
+        .to_dtype(DType::F32)?
+        .abs()?
+        .to_dtype(DType::I64)?;
+
+    println!("on_true: {:?}\n{}", on_true, on_true.to_string());
+    println!("on_false: {:?}\n{}", on_false, on_false.to_string());
+
+    let abs_pos = condition_bool.where_cond(&on_true, &on_false)?;
+    /*
+    torch.ceil(
+        torch.log(abs_pos / mid) /
+        torch.log(
+            torch.tensor((max_position - 1) / mid)
+        )
+        * (mid - 1)
+    ) + mid
+     */
+
+    let mid_as_tensor = Tensor::from_slice(&[mid as f32], (1,), device)?;
+
+    let log_pos = {
+        // let mid_as_tensor = Tensor::from_slice(&[mid as f32], (1,), &self.device)?;
+
+        let first_log = abs_pos
+            .to_dtype(DType::F32)?
+            .broadcast_div(&mid_as_tensor)?
+            .log()?;
+
+        println!("first_log: {:?}\n{}", first_log, first_log.to_string());
+
+        let second_log = Tensor::from_slice(
+            &[((max_position as f32 - 1.0) / mid as f32) as f32],
+            (1,),
+            device,
+        )?
+        .log()?;
+
+        let first_div_second = first_log.broadcast_div(&second_log)?;
+
+        let to_ceil = first_div_second
+            .broadcast_mul(Tensor::from_slice(&[(mid - 1) as f32], (1,), device)?.as_ref())?;
+
+        let ceil = to_ceil.ceil()?;
+
+        println!("ceil: {:?}\n{}", ceil, ceil.to_string());
+
+        ceil.broadcast_add(&mid_as_tensor)?
+    };
+
+    println!("log_pos: {:?}\n{}", log_pos, log_pos.to_string());
+
+    let bucket_pos = {
+        let abs_pos_lte_mid = abs_pos.to_dtype(DType::F32)?.broadcast_le(&mid_as_tensor)?;
+        // println!(
+        //     "abs_pos_lte_mid: {:?}\n{}",
+        //     abs_pos_lte_mid,
+        //     abs_pos_lte_mid.to_string()
+        // );
+        let relative_pos = relative_pos.to_dtype(relative_pos.dtype())?;
+        // println!(
+        //     "relative_pos: {:?}\n{}",
+        //     relative_pos,
+        //     relative_pos.to_string()
+        // );
+        let log_pos_mul_sign = log_pos.broadcast_mul(&sign.to_dtype(DType::F32)?)?;
+        // println!(
+        //     "log_pos_mul_sign: {:?}\n{}",
+        //     log_pos_mul_sign,
+        //     log_pos_mul_sign.to_string()
+        // );
+
+        abs_pos_lte_mid.where_cond(&relative_pos.to_dtype(DType::F32)?, &log_pos_mul_sign)?
+    };
+    Ok(bucket_pos)
 }
