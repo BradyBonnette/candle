@@ -991,8 +991,7 @@ impl DebertaV2Attention {
             query_states = Some(hidden_states)
         }
 
-        let attention_output = self.output.forward()?;
-        todo!()
+        Ok(self.output.forward(&self_output, &query_states.unwrap())?)
     }
 }
 
@@ -1018,8 +1017,22 @@ impl DebertaV2SelfOutput {
         })
     }
 
-    pub fn forward(&self) -> candle::Result<Self> {
-        todo!()
+    pub fn forward(&self, hidden_states: &Tensor, input_tensor: &Tensor) -> candle::Result<Tensor> {
+        let mut hidden_states = self.dense.forward(hidden_states)?;
+        t!("hidden_states", hidden_states);
+        hidden_states =
+            self.dropout
+                .forward(Some(&hidden_states))?
+                .ok_or(candle::error::Error::Msg(
+                    "DebertaV2SelfOuput dropout did not return a Tensor".to_string(),
+                ))?;
+        t!("hidden_states", hidden_states);
+        hidden_states = {
+            let to_norm = hidden_states.broadcast_add(input_tensor)?;
+            self.layer_norm.forward(&to_norm)?
+        };
+        t!("hidden_states", hidden_states);
+        Ok(hidden_states)
     }
 }
 
