@@ -1055,8 +1055,14 @@ impl DebertaV2Intermediate {
         })
     }
 
-    pub fn forward(&self) -> candle::Result<Tensor> {
-        todo!()
+    pub fn forward(&self, hidden_states: &Tensor) -> candle::Result<Tensor> {
+        // let mut hidden_states = hidden_states;
+        let mut hidden_states = self.dense.forward(&hidden_states)?;
+        t!("hidden_states", hidden_states);
+        hidden_states = self.intermediate_act.forward(&hidden_states)?;
+        t!("hidden_states", hidden_states);
+
+        Ok(hidden_states)
     }
 }
 
@@ -1086,8 +1092,22 @@ impl DebertaV2Output {
         })
     }
 
-    pub fn forward(&self) -> candle::Result<Tensor> {
-        todo!()
+    pub fn forward(&self, hidden_states: &Tensor, input_tensor: &Tensor) -> candle::Result<Tensor> {
+        let mut hidden_states = self.dense.forward(&hidden_states)?;
+        t!("hidden_states", hidden_states);
+        hidden_states =
+            self.dropout
+                .forward(Some(&hidden_states))?
+                .ok_or(candle::error::Error::Msg(
+                    "DebertaV2Ouptut did not receive a Tensor after dropout".to_string(),
+                ))?;
+        t!("hidden_states", hidden_states);
+        hidden_states = {
+            let to_norm = hidden_states.broadcast_add(input_tensor)?;
+            self.layer_norm.forward(&to_norm)?
+        };
+        t!("hidden_states", hidden_states);
+        Ok(hidden_states)
     }
 }
 
@@ -1124,7 +1144,15 @@ impl DebertaV2Layer {
             relative_pos,
             rel_embeddings,
         )?;
-        todo!()
+        t!("attention_output", attention_output);
+
+        let intermediate_output = self.intermediate.forward(&attention_output)?;
+
+        let layer_output = self
+            .output
+            .forward(&intermediate_output, &attention_output)?;
+
+        Ok(layer_output)
     }
 
     // pub fn forward(&self) -> candle::Result<Tensor> {
@@ -1324,6 +1352,10 @@ impl DebertaV2Encoder {
                 relative_pos.as_ref(),
                 rel_embeddings.as_ref(),
             )?;
+
+            if i == 0 && self.conv.is_some() {
+                output_states = self.conv.unwrap().forward
+            }
         }
 
         todo!()
