@@ -6,10 +6,11 @@ macro_rules! t {
 }
 // TEMPORARY
 
-use candle::{DType, Device, Module, Tensor, D};
+use candle::{shape::ShapeWithOneHole, DType, Device, Module, Tensor, D};
 use candle_nn::{
     conv1d, embedding, layer_norm, Conv1d, Conv1dConfig, Embedding, LayerNorm, VarBuilder,
 };
+use num_traits::ops;
 use serde::{Deserialize, Deserializer};
 pub const DTYPE: DType = DType::F32;
 
@@ -340,6 +341,67 @@ impl DebertaV2Embeddings {
     }
 }
 
+/*
+fn masked_fill(input: &Tensor, mask: &Tensor, value: f32) -> candle::Result<Tensor> {
+    // Check if shapes are different
+    if input.shape() != mask.shape() {
+        // Attempt to broadcast the mask to the input shape
+        let broadcasted_mask = mask.broadcast_as(input.shape())?.to_dtype(DType::I64)?;
+        let fill_tensor =
+            Tensor::full(value, input.shape(), input.device())?.to_dtype(DType::I64)?;
+        t!("input", input);
+        t!("broadcasted_mask", broadcasted_mask);
+        t!("fill_tensor", fill_tensor);
+
+        // FIX THIS could not foward: Cuda(UnexpectedDType { msg: "where conditions should be u8/u32/i64", expected: U32, got: F32 })
+        // FIX THIS could not foward: Cuda(UnexpectedDType { msg: "where conditions should be u8/u32/i64", expected: U32, got: F32 })
+        // FIX THIS could not foward: Cuda(UnexpectedDType { msg: "where conditions should be u8/u32/i64", expected: U32, got: F32 })
+        // FIX THIS could not foward: Cuda(UnexpectedDType { msg: "where conditions should be u8/u32/i64", expected: U32, got: F32 })
+        // FIX THIS could not foward: Cuda(UnexpectedDType { msg: "where conditions should be u8/u32/i64", expected: U32, got: F32 })
+        // FIX THIS could not foward: Cuda(UnexpectedDType { msg: "where conditions should be u8/u32/i64", expected: U32, got: F32 })
+        input.where_cond(&broadcasted_mask, &fill_tensor)
+    } else {
+        // Shapes are the same, proceed as before
+        let fill_tensor = Tensor::full(value, input.shape(), input.device())?;
+        input.where_cond(mask, &fill_tensor)
+    }
+}
+*/
+
+fn masked_fill(target: &Tensor, mask: &Tensor, value: f32) -> candle::Result<Tensor> {
+    todo!()
+}
+
+struct XSoftmax {}
+
+impl XSoftmax {
+    pub fn apply(input: &Tensor, mask: &Tensor, dim: D, device: &Device) -> candle::Result<Tensor> {
+        // t!("input", input);
+        t!("attention_mask @ XSoftmax apply", mask);
+        // NOTE: At the time of this writing, candle does not have a logical-not operator.
+        let mut rmask = mask.broadcast_as(input.shape())?.to_dtype(DType::F32)?;
+        t!("rmask", rmask);
+        rmask = rmask
+            .broadcast_lt(&Tensor::new(&[1.0 as f32], device)?)?
+            .to_dtype(DType::U8)?;
+        t!("rmask", rmask);
+
+        // masked fill?
+        let min_value_tensor = Tensor::new(&[f32::MIN], device)?.broadcast_as(input.shape())?;
+        let mut output = rmask.where_cond(&min_value_tensor, &input)?;
+
+        t!("output", output);
+        output = candle_nn::ops::softmax(&output, dim)?;
+        t!("output", output);
+
+        let t_zeroes = Tensor::new(&[0f32], device)?.broadcast_as(input.shape())?;
+        output = rmask.where_cond(&t_zeroes, &output)?;
+        t!("output", output);
+
+        Ok(output)
+    }
+}
+
 // pub struct DebertaV2DisentangledSelfAttention<'a> {
 pub struct DebertaV2DisentangledSelfAttention {
     pub config: Config,
@@ -455,12 +517,13 @@ impl DebertaV2DisentangledSelfAttention {
         query_states: Option<&Tensor>,
         relative_pos: Option<&Tensor>,
         rel_embeddings: Option<&Tensor>,
-    ) -> candle::Result<Self> {
+    ) -> candle::Result<Tensor> {
         let query_states = match query_states {
             Some(qs) => qs,
             None => hidden_states,
         };
 
+        t!("attention_mask @ DSA forward", attention_mask);
         // println!(
         //     "query_states: {:?}\n{}",
         //     query_states.dims(),
@@ -503,7 +566,7 @@ impl DebertaV2DisentangledSelfAttention {
             Tensor::new(&[(q_size * scale_factor) as f32], &self.device)?.sqrt()?
         };
 
-        let attention_scores = {
+        let mut attention_scores: Tensor = {
             let key_layer_transposed = key_layer.transpose(D::Minus1, D::Minus2)?;
             // println!(
             //     "key_layer_transposed: {:?}\n{}",
@@ -541,15 +604,99 @@ impl DebertaV2DisentangledSelfAttention {
             )?);
         }
 
-        // let scale = Tensor::new(query_layer[..], self.vb.device())?;
+        if rel_att.is_some() {
+            attention_scores = attention_scores.broadcast_add(&rel_att.unwrap())?;
+        }
 
-        // let scale = {
-        //     let dim_size = query_layer.dim(query_layer.dims() - 1)?;
-        //     let dim_float = dim_size as f64;
-        //     (dim_float * scale_factor).sqrt()
-        // }?;
+        t!("attention_scores", attention_scores);
 
-        todo!()
+        attention_scores = attention_scores.reshape((
+            (),
+            self.num_attention_heads,
+            attention_scores.dim(D::Minus2)?,
+            attention_scores.dim(D::Minus1)?,
+        ))?;
+
+        t!("attention_scores", attention_scores);
+
+        let mut attention_probs =
+            XSoftmax::apply(&attention_scores, &attention_mask, D::Minus1, &self.device)?;
+
+        t!("attention_probs", attention_probs);
+
+        attention_probs =
+            self.dropout
+                .forward(Some(&attention_probs))?
+                .ok_or(candle::Error::Msg(
+                    "Dropout did not return a value".to_string(),
+                ))?;
+
+        t!("attention_probs", attention_probs);
+
+        let mut context_layer = attention_probs
+            .reshape((
+                (),
+                attention_probs.dim(D::Minus2)?,
+                attention_probs.dim(D::Minus1)?,
+            ))?
+            .matmul(&value_layer)?;
+
+        t!("context_layer", context_layer);
+
+        context_layer = context_layer
+            .reshape((
+                (),
+                self.num_attention_heads,
+                context_layer.dim(D::Minus2)?,
+                context_layer.dim(D::Minus1)?,
+            ))?
+            .permute((0, 2, 1, 3))?
+            .contiguous()?;
+
+        t!("context_layer", context_layer);
+
+        // let new_context_layer_shape = {
+        //     let g = (1,2,3);
+        //     let f = context_layer.reshape()
+        //     let shape = context_layer.dims();
+        //     let f = context_layer.shape();
+        //     let new_shape: Vec<D> = shape[(..shape.len() - 2).into()].to_vec();
+        //     new_shape.push(D::Minus1 as isize);
+        // };
+        // macro_rules! context_resize_tuple {
+        //     ($slice:expr) => {{
+        //         let len = $slice.len();
+        //         match len {
+        //             2 => ((),),
+        //             3 => ($slice[0], ()),
+        //             4 => ($slice[0], $slice[1], ()),
+        //             5 => ($slice[0], $slice[1], $slice[2], ()),
+        //             _ => panic!("Slice length must be between 2 and 5"),
+        //         }
+        //     }};
+        // }
+
+        // To replicate the following lines in the Python code:
+        //   new_context_layer_shape = context_layer.size()[:-2] + (-1,)
+        //   context_layer = context_layer.view(new_context_layer_shape)
+        let dims = context_layer.dims();
+
+        context_layer = match dims.len() {
+            2 => context_layer.reshape(())?,
+            3 => context_layer.reshape((dims[0], ()))?,
+            4 => context_layer.reshape((dims[0], dims[1], ()))?,
+            5 => context_layer.reshape((dims[0], dims[1], dims[2], ()))?,
+            _ => {
+                return Err(candle::Error::Msg(format!(
+                    "Invalid shape for DisentabgledSelfAttention context layer: {:?}",
+                    dims
+                )))
+            }
+        };
+
+        t!("context_layer", context_layer);
+
+        Ok(context_layer)
     }
 
     // fn transpose_for_scores(&self, x: &Tensor, attention_heads:)
@@ -838,6 +985,13 @@ impl DebertaV2Attention {
             relative_pos,
             rel_embeddings,
         )?;
+
+        let mut query_states = query_states;
+        if query_states.is_none() {
+            query_states = Some(hidden_states)
+        }
+
+        let attention_output = self.output.forward()?;
         todo!()
     }
 }
@@ -1131,7 +1285,12 @@ impl DebertaV2Encoder {
                 .gt(0.)?
         };
 
+        t!("input_mask @ DebertaV2Encoder forward", input_mask);
+
         let attention_mask = self.get_attention_mask(attention_mask.clone())?;
+
+        t!("attention_mask @ DebertaV2Encoder", attention_mask);
+
         let relative_pos = self.get_rel_pos(hidden_states, query_states, relative_pos)?;
 
         let next_kv = hidden_states;
@@ -1266,8 +1425,7 @@ impl<'vb> DebertaV2Model<'vb> {
             None => Tensor::ones(input_ids_shape, DType::I64, self.vb.device())?,
         };
 
-        println!("Attention mask dims: {:?}", attention_mask.dims());
-        println!("Attention mask: {}", attention_mask.to_string());
+        t!("attention_mask @ DebertaV2Model forward", attention_mask);
 
         let token_type_ids = match token_type_ids {
             Some(ids) => ids,
@@ -1275,8 +1433,7 @@ impl<'vb> DebertaV2Model<'vb> {
             None => Tensor::zeros(input_ids_shape, DType::U32, self.vb.device())?,
         };
 
-        println!("Token type ids dims: {:?}", token_type_ids.dims());
-        println!("Token type ids: {}", attention_mask.to_string());
+        t!("token_type_ids @ DebertaV2Model forward", token_type_ids);
 
         let embedding_output = self.embeddings.forward(
             Some(input_ids),
@@ -1295,8 +1452,7 @@ impl<'vb> DebertaV2Model<'vb> {
             self.encoder
                 .forward(&embedding_output, &attention_mask, None, None)?;
 
-        println!("embedding output dims: {:?}", embedding_output.dims());
-        println!("embedding output: {}", embedding_output.to_string());
+        t!("encoder_output @ DebertaV2Model", encoder_output);
 
         if self.z_steps > 1 {
             todo!("Copmlete DebertaV2Model forward() when z_steps > 1")
@@ -1487,3 +1643,91 @@ pub(crate) fn make_log_bucket_position(
     };
     Ok(bucket_pos)
 }
+
+// fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> candle::Result<Tensor> {
+//     let shape = mask.shape();
+//     let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
+//     let m = mask.where_cond(&on_true, on_false)?;
+//     Ok(m)
+// }
+
+// fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> candle::Result<Tensor> {
+//     t!("on_false", on_false);
+//     t!("mask", mask);
+//     t!("on_true", on_true);
+//     let shape = mask.shape();
+//     // let m = mask.where_cond(&on_true.broadcast_as(shape.dims())?, on_false)?;
+//     let m = mask.where_cond(
+//         &on_true.broadcast_as(shape.dims())?,
+//         &on_false.broadcast_as(shape.dims())?,
+//     )?;
+//     t!("m", m);
+//     Ok(m)
+// }
+
+// fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> candle::Result<Tensor> {
+//     let shape = mask.shape();
+//     let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
+//     t!("on_true", on_true);
+//     t!("on_false", on_false);
+//     let m = mask.where_cond(&on_true, on_false)?;
+//     Ok(m)
+// }
+
+/*
+
+fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> candle::Result<Tensor> {
+    // Convert the mask to boolean and invert it
+    // let rmask = mask.to_dtype(DType::Bool)?.logical_not()?;
+
+    // Get the minimum value for the input's data type
+    // let min_value = match input.dtype() {
+    //     DType::F32 => std::f32::MIN,
+    //     DType::F64 => std::f64::MIN,
+    //     _ => return Err(candle::Error::Other("Unsupported data type".into())),
+    // };
+
+    // Create a tensor with the minimum value
+    let min_value_tensor = Tensor::new(on_true, on_false.device())?;
+
+    // Mask the input tensor
+    let masked_input = on_false.where_cond(&mask, &min_value_tensor)?;
+
+    // Apply the softmax operation
+    let softmax_output = masked_input.softmax(dim)?;
+
+    // Mask the softmax output, setting values to zero where the mask is `False`
+    let zero_tensor = Tensor::zeros(&[], input.device())?;
+    let final_output = softmax_output.where_cond(&rmask, &zero_tensor)?;
+
+    Ok(final_output)
+
+    // let shape = mask.shape();
+    // let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
+    // let m = mask.where_cond(&on_true, on_false)?;
+    // Ok(m)
+
+    // // let shape = mask.shape();
+    // let mut on_true = Tensor::new(on_true, on_false.device())?;
+    // t!("on_false", on_false);
+    // // t!("on_true", on_true);
+    // // on_true = on_true.broadcast_as(shape.dims())?;
+    // on_true = on_true.broadcast_as(on_false.dims())?;
+    // let mask = mask.broadcast_as(on_false.shape())?;
+    // t!("mask", mask);
+    // t!("on_true", on_true);
+    // let m = mask.where_cond(&on_true, on_false)?;
+    // Ok(m)
+
+    // let shape = mask.shape();
+
+    // // Broadcast `on_true` to the shape of `on_false`
+    // let on_true_tensor = Tensor::new(on_true, on_false.device())?.broadcast_as(on_false.shape())?;
+
+    // // Broadcast the mask to the shape of `on_false`
+    // let mask_broadcasted = mask.broadcast_as(on_false.shape())?;
+
+    // let m = mask_broadcasted.where_cond(&on_true_tensor, on_false)?;
+    // Ok(m)
+}
+*/
