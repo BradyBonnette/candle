@@ -1,10 +1,12 @@
 // TEMPORARY
 macro_rules! t {
     ($name:expr, $tensor:expr) => {
-        println!("\n{}:\n{}", $name, $tensor.to_string());
+        // println!("\n{}:\n{}", $name, $tensor.to_string());
     };
 }
 // TEMPORARY
+
+use std::ops::Deref;
 
 use candle::{shape::ShapeWithOneHole, DType, Device, Module, Tensor, D};
 use candle_nn::{
@@ -1205,8 +1207,13 @@ impl ConvLayer {
         })
     }
 
-    pub fn forward(&self) -> candle::Result<Tensor> {
-        todo!()
+    pub fn forward(
+        &self,
+        hidden_states: &Tensor,
+        residual_states: &Tensor,
+        input_mask: &Tensor,
+    ) -> candle::Result<Tensor> {
+        todo!("Need a model that contains a conv layer to test against.")
     }
 }
 
@@ -1334,9 +1341,13 @@ impl DebertaV2Encoder {
 
         let relative_pos = self.get_rel_pos(hidden_states, query_states, relative_pos)?;
 
-        let next_kv = hidden_states;
+        // let next_kv = hidden_states;
+        let mut next_kv: Tensor = hidden_states.clone();
         let rel_embeddings = self.get_rel_embedding()?;
         let mut output_states = next_kv.to_owned();
+
+        // let mut query_states = query_states;
+        let mut query_states: Option<Tensor> = query_states.cloned();
 
         for (i, layer_module) in self.layer.iter().enumerate() {
             // TODO: Ignoring output_hidden_states for now
@@ -1345,20 +1356,36 @@ impl DebertaV2Encoder {
             // used for training vs. inferencing. For now, we will only handle the
             // inferencing side of things
 
+            // let mut output_states = layer_module.forward(
             output_states = layer_module.forward(
-                next_kv,
+                next_kv.as_ref(),
                 &attention_mask,
-                query_states,
+                query_states.as_ref(),
                 relative_pos.as_ref(),
                 rel_embeddings.as_ref(),
             )?;
 
+            t!("output_states", output_states);
+
             if i == 0 && self.conv.is_some() {
-                output_states = self.conv.unwrap().forward
+                output_states = self.conv.as_ref().unwrap().forward(
+                    hidden_states,
+                    &output_states,
+                    &input_mask,
+                )?;
             }
+
+            if query_states.is_some() {
+                query_states = Some(output_states.clone());
+            } else {
+                next_kv = output_states.clone();
+            }
+
+            t!("next_kv", next_kv);
         }
 
-        todo!()
+        t!("output_states final", output_states);
+        Ok(output_states)
     }
 
     // TEMP: Verified
@@ -1503,7 +1530,8 @@ impl<'vb> DebertaV2Model<'vb> {
             todo!("Copmlete DebertaV2Model forward() when z_steps > 1")
         }
 
-        Ok(embedding_output)
+        // Ok(embedding_output)
+        Ok(encoder_output)
     }
 }
 
