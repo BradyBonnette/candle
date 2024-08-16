@@ -1,12 +1,12 @@
 // TEMPORARY
 macro_rules! t {
     ($name:expr, $tensor:expr) => {
-        // println!("\n{}:\n{}", $name, $tensor.to_string());
+        println!("\n{}:\n{}", $name, $tensor.to_string());
     };
 }
 // TEMPORARY
 
-use std::ops::Deref;
+use std::{collections::HashMap, ops::Deref};
 
 use candle::{shape::ShapeWithOneHole, DType, Device, Module, Tensor, D};
 use candle_nn::{
@@ -103,8 +103,25 @@ fn deserialize_pos_att_type<'de, D>(deserializer: D) -> Result<Vec<String>, D::E
 where
     D: Deserializer<'de>,
 {
-    let s: String = String::deserialize(deserializer)?;
-    Ok(s.split('|').map(String::from).collect())
+    // Define an intermediate enum to represent the possible input types
+    #[derive(Deserialize, Debug)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        String(String),
+        Vec(Vec<String>),
+    }
+
+    // Deserialize the input into the intermediate enum
+    let parsed: StringOrVec = StringOrVec::deserialize(deserializer)?;
+
+    // println!("parsed: {:?}", parsed);
+    // Match on the enum to handle both cases
+    match parsed {
+        StringOrVec::String(s) => Ok(s.split('|').map(String::from).collect()),
+        StringOrVec::Vec(v) => Ok(v),
+    }
+    // let s: String = String::deserialize(deserializer)?;
+    // Ok(s.split('|').map(String::from).collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -135,6 +152,8 @@ pub struct Config {
     pub conv_kernel_size: Option<usize>,
     pub conv_groups: Option<usize>,
     pub conv_act: Option<String>,
+    pub id2label: Option<HashMap<usize, String>>,
+    pub label2id: Option<HashMap<String, usize>>,
 }
 
 // TODO: Dropout is probably not needed for now since this will primarily be used
@@ -267,6 +286,8 @@ impl DebertaV2Embeddings {
         // TEMP: Verified
         let seq_length = input_shape.last().unwrap().to_owned();
 
+        t!("self.position_ids", self.position_ids);
+
         // TEMP: Verified
         let position_ids = match position_ids {
             Some(p) => p.to_owned(),
@@ -274,8 +295,8 @@ impl DebertaV2Embeddings {
             None => self.position_ids.narrow(1, 0, seq_length)?,
         };
 
-        println!("position_ids dims: {:?}", position_ids.dims());
-        println!("position_ids: {}", position_ids.to_string());
+        // println!("position_ids dims: {:?}", position_ids.dims());
+        // println!("position_ids: {}", position_ids.to_string());
 
         // TEMP: Verified
         let token_type_ids = match token_type_ids {
@@ -283,8 +304,8 @@ impl DebertaV2Embeddings {
             None => Tensor::zeros(input_shape, DType::U32, &self.device)?,
         };
 
-        println!("token_type_ids dims: {:?}", token_type_ids.dims());
-        println!("token_type_ids: {}", token_type_ids.to_string());
+        // println!("token_type_ids dims: {:?}", token_type_ids.dims());
+        // println!("token_type_ids: {}", token_type_ids.to_string());
 
         // TEMP: Verified
         let input_embeds = match inputs_embeds {
@@ -292,8 +313,8 @@ impl DebertaV2Embeddings {
             None => self.word_embeddings.forward(input_ids.unwrap())?,
         };
 
-        println!("input_embeds dims: {:?}", input_embeds.dims());
-        println!("input_embeds: {}", input_embeds.to_string());
+        // println!("input_embeds dims: {:?}", input_embeds.dims());
+        // println!("input_embeds: {}", input_embeds.to_string());
 
         // TEMP: Verified
         let position_embeddings = match &self.position_embeddings {
@@ -751,7 +772,7 @@ impl DebertaV2DisentangledSelfAttention {
 
         relative_pos = relative_pos.to_dtype(DType::I64)?;
 
-        t!("relative_pos", relative_pos);
+        // t!("relative_pos", relative_pos);
 
         // println!(
         //     "relative_pos: {:?}\n{}",
@@ -1567,11 +1588,11 @@ pub(crate) fn build_relative_position(
     let k_ids: Tensor = Tensor::arange(0, key_size as i64, device)?.unsqueeze(D::Minus1)?;
     // let mut rel_pos_ids = q_ids.broadcast_sub(&k_ids)?;
     let mut rel_pos_ids = k_ids.broadcast_sub(&q_ids)?;
-    println!(
-        "real_pos_ids: {:?}\n{}",
-        rel_pos_ids,
-        rel_pos_ids.to_string()
-    );
+    // println!(
+    //     "real_pos_ids: {:?}\n{}",
+    //     rel_pos_ids,
+    //     rel_pos_ids.to_string()
+    // );
 
     let bucket_size = bucket_size.unwrap_or(-1);
     let max_position = max_position.unwrap_or(-1);
@@ -1587,19 +1608,19 @@ pub(crate) fn build_relative_position(
     // let narrowed_rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
     rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
 
-    println!(
-        "real_pos_ids narrow: {:?}\n{}",
-        rel_pos_ids,
-        rel_pos_ids.to_string()
-    );
+    // println!(
+    //     "real_pos_ids narrow: {:?}\n{}",
+    //     rel_pos_ids,
+    //     rel_pos_ids.to_string()
+    // );
 
     rel_pos_ids = rel_pos_ids.unsqueeze(0)?;
 
-    println!(
-        "real_pos_ids unsqueeze: {:?}\n{}",
-        rel_pos_ids,
-        rel_pos_ids.to_string()
-    );
+    // println!(
+    //     "real_pos_ids unsqueeze: {:?}\n{}",
+    //     rel_pos_ids,
+    //     rel_pos_ids.to_string()
+    // );
 
     Ok(rel_pos_ids)
 }
@@ -1615,7 +1636,7 @@ pub(crate) fn make_log_bucket_position(
         .sign()?
         .to_dtype(DType::I64)?; // TODO: This cast might be unnecessary
 
-    println!("sign: {:?}\n{}", sign, sign.to_string());
+    // println!("sign: {:?}\n{}", sign, sign.to_string());
 
     let mid = bucket_size / 2;
 
@@ -1628,11 +1649,11 @@ pub(crate) fn make_log_bucket_position(
 
     let condition_bool = condition.to_dtype(DType::U8)?;
 
-    println!(
-        "condition_bool: {:?}\n{}",
-        condition_bool,
-        condition_bool.to_string()
-    );
+    // println!(
+    //     "condition_bool: {:?}\n{}",
+    //     condition_bool,
+    //     condition_bool.to_string()
+    // );
 
     // let g = vec![(mid - 1)];
 
@@ -1645,8 +1666,8 @@ pub(crate) fn make_log_bucket_position(
         .abs()?
         .to_dtype(DType::I64)?;
 
-    println!("on_true: {:?}\n{}", on_true, on_true.to_string());
-    println!("on_false: {:?}\n{}", on_false, on_false.to_string());
+    // println!("on_true: {:?}\n{}", on_true, on_true.to_string());
+    // println!("on_false: {:?}\n{}", on_false, on_false.to_string());
 
     let abs_pos = condition_bool.where_cond(&on_true, &on_false)?;
     /*
@@ -1669,7 +1690,7 @@ pub(crate) fn make_log_bucket_position(
             .broadcast_div(&mid_as_tensor)?
             .log()?;
 
-        println!("first_log: {:?}\n{}", first_log, first_log.to_string());
+        // println!("first_log: {:?}\n{}", first_log, first_log.to_string());
 
         let second_log = Tensor::from_slice(
             &[((max_position as f32 - 1.0) / mid as f32) as f32],
@@ -1685,12 +1706,12 @@ pub(crate) fn make_log_bucket_position(
 
         let ceil = to_ceil.ceil()?;
 
-        println!("ceil: {:?}\n{}", ceil, ceil.to_string());
+        // println!("ceil: {:?}\n{}", ceil, ceil.to_string());
 
         ceil.broadcast_add(&mid_as_tensor)?
     };
 
-    println!("log_pos: {:?}\n{}", log_pos, log_pos.to_string());
+    // println!("log_pos: {:?}\n{}", log_pos, log_pos.to_string());
 
     let bucket_pos = {
         let abs_pos_lte_mid = abs_pos.to_dtype(DType::F32)?.broadcast_le(&mid_as_tensor)?;
