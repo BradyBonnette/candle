@@ -430,22 +430,22 @@ impl XSoftmax {
 
 // pub struct DebertaV2DisentangledSelfAttention<'a> {
 pub struct DebertaV2DisentangledSelfAttention {
-    pub config: Config,
-    pub num_attention_heads: usize,
-    pub attention_head_size: usize,
-    pub query_proj: candle_nn::Linear,
-    pub key_proj: candle_nn::Linear,
-    pub value_proj: candle_nn::Linear,
-    pub dropout: StableDropout,
-    pub device: Device,
-    pub relative_attention: bool,
-    pub pos_dropout: Option<StableDropout>,
-    pub position_buckets: isize,
-    pub max_relative_positions: isize,
-    pub pos_ebd_size: isize,
-    pub share_att_key: bool,
-    pub pos_key_proj: Option<candle_nn::Linear>,
-    pub pos_query_proj: Option<candle_nn::Linear>,
+    config: Config,
+    num_attention_heads: usize,
+    attention_head_size: usize,
+    query_proj: candle_nn::Linear,
+    key_proj: candle_nn::Linear,
+    value_proj: candle_nn::Linear,
+    dropout: StableDropout,
+    device: Device,
+    relative_attention: bool,
+    pos_dropout: Option<StableDropout>,
+    position_buckets: isize,
+    max_relative_positions: isize,
+    pos_ebd_size: isize,
+    share_att_key: bool,
+    pos_key_proj: Option<candle_nn::Linear>,
+    pos_query_proj: Option<candle_nn::Linear>,
 }
 
 // impl<'a> DebertaV2DisentangledSelfAttention<'a> {
@@ -1022,9 +1022,9 @@ impl DebertaV2Attention {
 }
 
 pub struct DebertaV2SelfOutput {
-    pub dense: candle_nn::Linear,
-    pub layer_norm: LayerNorm,
-    pub dropout: StableDropout,
+    dense: candle_nn::Linear,
+    layer_norm: LayerNorm,
+    dropout: StableDropout,
 }
 
 impl DebertaV2SelfOutput {
@@ -1063,8 +1063,8 @@ impl DebertaV2SelfOutput {
 }
 
 pub struct DebertaV2Intermediate {
-    pub dense: candle_nn::Linear,
-    pub intermediate_act: HiddenActLayer,
+    dense: candle_nn::Linear,
+    intermediate_act: HiddenActLayer,
 }
 
 impl DebertaV2Intermediate {
@@ -1093,9 +1093,9 @@ impl DebertaV2Intermediate {
 }
 
 pub struct DebertaV2Output {
-    pub dense: candle_nn::Linear,
-    pub layer_norm: LayerNorm,
-    pub dropout: StableDropout,
+    dense: candle_nn::Linear,
+    layer_norm: LayerNorm,
+    dropout: StableDropout,
 }
 
 impl DebertaV2Output {
@@ -1138,9 +1138,9 @@ impl DebertaV2Output {
 }
 
 pub struct DebertaV2Layer {
-    pub attention: DebertaV2Attention,
-    pub intermediate: DebertaV2Intermediate,
-    pub output: DebertaV2Output,
+    attention: DebertaV2Attention,
+    intermediate: DebertaV2Intermediate,
+    output: DebertaV2Output,
 }
 
 impl DebertaV2Layer {
@@ -1242,16 +1242,16 @@ impl ConvLayer {
 }
 
 pub struct DebertaV2Encoder {
-    pub layer: Vec<DebertaV2Layer>,
-    pub relative_attention: bool,
-    pub max_relative_positions: isize,
-    pub position_buckets: isize,
-    pub rel_embeddings: Option<Embedding>,
-    pub norm_rel_ebd: String,
-    pub layer_norm: Option<LayerNorm>,
-    pub conv: Option<ConvLayer>,
-    pub gradient_checkpointing: bool,
-    pub device: Device,
+    layer: Vec<DebertaV2Layer>,
+    relative_attention: bool,
+    max_relative_positions: isize,
+    position_buckets: isize,
+    rel_embeddings: Option<Embedding>,
+    norm_rel_ebd: String,
+    layer_norm: Option<LayerNorm>,
+    conv: Option<ConvLayer>,
+    gradient_checkpointing: bool,
+    device: Device,
 }
 
 impl DebertaV2Encoder {
