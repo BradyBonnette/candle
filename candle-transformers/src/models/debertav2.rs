@@ -1,19 +1,19 @@
 // TEMPORARY
 macro_rules! t {
     ($name:expr, $tensor:expr) => {
-        println!("\n{}:\n{}", $name, $tensor.to_string());
+        // println!("\n{}:\n{}", $name, $tensor.to_string());
     };
 }
 // TEMPORARY
 
-use std::{collections::HashMap, ops::Deref};
+use std::collections::HashMap;
 
-use candle::{shape::ShapeWithOneHole, DType, Device, Module, Tensor, D};
+use candle::{DType, Device, Module, Tensor, D};
 use candle_nn::{
     conv1d, embedding, layer_norm, Conv1d, Conv1dConfig, Embedding, LayerNorm, VarBuilder,
 };
-use num_traits::ops;
 use serde::{Deserialize, Deserializer};
+
 pub const DTYPE: DType = DType::F32;
 
 // NOTE: HiddenAct and HiddenActLayer are both direct copies from bert.rs.
@@ -99,30 +99,8 @@ enum PositionEmbeddingType {
 //     layer_norm_eps (`float`, optional, defaults to 1e-12):
 //         The epsilon used by the layer normalization layers.
 
-fn deserialize_pos_att_type<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    // Define an intermediate enum to represent the possible input types
-    #[derive(Deserialize, Debug)]
-    #[serde(untagged)]
-    enum StringOrVec {
-        String(String),
-        Vec(Vec<String>),
-    }
-
-    // Deserialize the input into the intermediate enum
-    let parsed: StringOrVec = StringOrVec::deserialize(deserializer)?;
-
-    // println!("parsed: {:?}", parsed);
-    // Match on the enum to handle both cases
-    match parsed {
-        StringOrVec::String(s) => Ok(s.split('|').map(String::from).collect()),
-        StringOrVec::Vec(v) => Ok(v),
-    }
-    // let s: String = String::deserialize(deserializer)?;
-    // Ok(s.split('|').map(String::from).collect())
-}
+pub type Id2Label = HashMap<usize, String>;
+pub type Label2Id = HashMap<String, usize>;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Config {
@@ -152,8 +130,33 @@ pub struct Config {
     pub conv_kernel_size: Option<usize>,
     pub conv_groups: Option<usize>,
     pub conv_act: Option<String>,
-    pub id2label: Option<HashMap<usize, String>>,
-    pub label2id: Option<HashMap<String, usize>>,
+    pub id2label: Option<Id2Label>,
+    pub label2id: Option<Label2Id>,
+}
+
+fn deserialize_pos_att_type<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Define an intermediate enum to represent the possible input types
+    #[derive(Deserialize, Debug)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        String(String),
+        Vec(Vec<String>),
+    }
+
+    // Deserialize the input into the intermediate enum
+    let parsed: StringOrVec = StringOrVec::deserialize(deserializer)?;
+
+    // println!("parsed: {:?}", parsed);
+    // Match on the enum to handle both cases
+    match parsed {
+        StringOrVec::String(s) => Ok(s.split('|').map(String::from).collect()),
+        StringOrVec::Vec(v) => Ok(v),
+    }
+    // let s: String = String::deserialize(deserializer)?;
+    // Ok(s.split('|').map(String::from).collect())
 }
 
 // TODO: Dropout is probably not needed for now since this will primarily be used
@@ -1480,16 +1483,20 @@ impl DebertaV2Encoder {
     // }
 }
 
-pub struct DebertaV2Model<'vb> {
+// pub struct DebertaV2Model<'vb> {
+pub struct DebertaV2Model {
     embeddings: DebertaV2Embeddings,
     encoder: DebertaV2Encoder,
     z_steps: usize,
     config: Config,
-    vb: VarBuilder<'vb>,
+    pub device: Device,
+    // vb: VarBuilder<'vb>,
 }
 
-impl<'vb> DebertaV2Model<'vb> {
-    pub fn load(vb: VarBuilder<'vb>, config: &Config) -> candle::Result<Self> {
+// impl<'vb> DebertaV2Model<'vb> {
+impl DebertaV2Model {
+    // pub fn load(vb: VarBuilder<'vb>, config: &Config) -> candle::Result<Self> {
+    pub fn load(vb: VarBuilder, config: &Config) -> candle::Result<Self> {
         let vb = vb.clone();
         let embeddings = DebertaV2Embeddings::load(vb.pp("embeddings"), config)?;
         let encoder = DebertaV2Encoder::load(vb.pp("encoder"), config)?;
@@ -1500,7 +1507,7 @@ impl<'vb> DebertaV2Model<'vb> {
             encoder,
             z_steps,
             config: config.clone(),
-            vb,
+            device: vb.device().clone(),
         })
     }
 
@@ -1515,7 +1522,7 @@ impl<'vb> DebertaV2Model<'vb> {
         let attention_mask = match attention_mask {
             Some(mask) => mask,
             // None => Tensor::ones(input_ids_shape, DType::U32, self.vb.device())?,
-            None => Tensor::ones(input_ids_shape, DType::I64, self.vb.device())?,
+            None => Tensor::ones(input_ids_shape, DType::I64, &self.device)?,
         };
 
         t!("attention_mask @ DebertaV2Model forward", attention_mask);
@@ -1523,7 +1530,7 @@ impl<'vb> DebertaV2Model<'vb> {
         let token_type_ids = match token_type_ids {
             Some(ids) => ids,
             // None => Tensor::zeros(input_ids_shape, DType::I64, self.vb.device())?,
-            None => Tensor::zeros(input_ids_shape, DType::U32, self.vb.device())?,
+            None => Tensor::zeros(input_ids_shape, DType::U32, &self.device)?,
         };
 
         t!("token_type_ids @ DebertaV2Model forward", token_type_ids);
@@ -1553,6 +1560,165 @@ impl<'vb> DebertaV2Model<'vb> {
 
         // Ok(embedding_output)
         Ok(encoder_output)
+    }
+}
+
+pub struct SentencePiece {
+    pub piece: String,
+    pub id: u32,
+    pub span: (u32, u32),
+    pub is_special: bool,
+}
+
+#[derive(Debug)]
+pub struct NERItem {
+    entity: String,
+    word: String,
+    score: f32,
+    start: u32,
+    end: u32,
+    index: usize,
+}
+
+pub struct DebertaV2NERModel {
+    pub device: Device,
+    id2label: Id2Label,
+    deberta: DebertaV2Model,
+    dropout: candle_nn::Dropout,
+    classifier: candle_nn::Linear,
+}
+
+impl DebertaV2NERModel {
+    pub fn load(
+        vb: VarBuilder,
+        config: &Config,
+        id2label: Option<Id2Label>,
+    ) -> candle::Result<Self> {
+        let id2label: Id2Label = match &config.id2label {
+            Some(i2l) => i2l.clone(),
+            None => id2label.ok_or(candle::error::Error::Msg("Id2Label is either not present in the model configuration or not passed into DebertaV2NERModel::load as a parameter".to_string()))?
+        };
+
+        let deberta = DebertaV2Model::load(vb.clone(), &config)?;
+        let dropout = candle_nn::Dropout::new(config.hidden_dropout_prob as f32);
+        let classifier: candle_nn::Linear =
+            candle_nn::linear_no_bias(config.hidden_size, 57, vb.root().pp("classifier"))?;
+
+        Ok(Self {
+            device: vb.device().clone(),
+            deberta,
+            id2label,
+            dropout,
+            classifier,
+        })
+    }
+
+    pub fn forward(
+        &self,
+        input_ids: &Tensor,
+        token_type_ids: Option<Tensor>,
+        attention_mask: Option<Tensor>,
+    ) -> candle::Result<Tensor> {
+        let output = self
+            .deberta
+            .forward(input_ids, token_type_ids, attention_mask)?;
+        let output = self.dropout.forward(&output, false)?;
+        Ok(self.classifier.forward(&output)?)
+
+        // for (idx, is_special) in self.special_tokens_mask.iter().enumerate() {
+        //     if *is_special {
+        //         continue;
+        //     }
+
+        //     let highest_score_idx = scores[idx]
+        //         .iter()
+        //         .enumerate()
+        //         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        //         .map(|(index, _)| index)
+        //         .unwrap();
+
+        //     let label = config
+        //         .id2label
+        //         .as_ref()
+        //         .unwrap()
+        //         .get(&highest_score_idx)
+        //         .unwrap()
+        //         .clone();
+
+        //     let (span, word) = match &encoded_tokens[idx] {
+        //         SentencePieceToken::Ignore => ((0, 0), String::from("")),
+        //         SentencePieceToken::Piece(piece) => {
+        //             ((piece.span.0, piece.span.1), piece.piece.to_owned())
+        //         }
+        //     };
+
+        //     values.push(NEREntity {
+        //         label,
+        //         word,
+        //         score: scores[idx][highest_score_idx],
+        //         start: span.0,
+        //         end: span.1,
+        //         index: idx,
+        //     })
+        // }
+    }
+
+    pub fn entities(
+        &self,
+        token_pieces: &Vec<SentencePiece>,
+        token_type_ids: Option<Tensor>,
+        attention_mask: Option<Tensor>,
+    ) -> candle::Result<Vec<Vec<NERItem>>> {
+        let token_ids: Vec<u32> = token_pieces.iter().map(|piece| piece.id).collect();
+
+        let input_ids: Tensor = Tensor::new(&token_ids[..], &self.device)?.unsqueeze(0)?;
+
+        let logits = self.forward(&input_ids, token_type_ids, attention_mask)?;
+
+        let maxes = logits.max_keepdim(D::Minus1)?;
+        let shifted_exp = {
+            let logits_minus_maxes = logits.broadcast_sub(&maxes)?;
+            logits_minus_maxes.exp()?
+        };
+        let scores = {
+            let sum = shifted_exp.sum_keepdim(D::Minus1)?;
+            shifted_exp.broadcast_div(&sum)?
+        };
+        let scores = scores.squeeze(0)?.to_vec2::<f32>()?;
+        let mut values: Vec<NERItem> = vec![];
+
+        for (idx, piece) in token_pieces.iter().enumerate() {
+            if piece.is_special {
+                continue;
+            }
+
+            let highest_score_idx = scores[idx]
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(index, _)| index)
+                .unwrap();
+
+            let label = self.id2label.get(&highest_score_idx).unwrap().clone();
+
+            // let (span, word) = match &encoded_tokens[idx] {
+            //     SentencePieceToken::Ignore => ((0, 0), String::from("")),
+            //     SentencePieceToken::Piece(piece) => {
+            //         ((piece.span.0, piece.span.1), piece.piece.to_owned())
+            //     }
+            // };
+
+            values.push(NERItem {
+                entity: label,
+                word: piece.piece.clone(),
+                score: scores[idx][highest_score_idx],
+                start: piece.span.0,
+                end: piece.span.1,
+                index: idx,
+            })
+        }
+
+        Ok(vec![values])
     }
 }
 
