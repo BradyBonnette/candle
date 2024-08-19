@@ -1601,8 +1601,11 @@ impl DebertaV2NERModel {
 
         let deberta = DebertaV2Model::load(vb.clone(), &config)?;
         let dropout = candle_nn::Dropout::new(config.hidden_dropout_prob as f32);
-        let classifier: candle_nn::Linear =
-            candle_nn::linear_no_bias(config.hidden_size, 57, vb.root().pp("classifier"))?;
+        let classifier: candle_nn::Linear = candle_nn::linear_no_bias(
+            config.hidden_size,
+            id2label.len(),
+            vb.root().pp("classifier"),
+        )?;
 
         Ok(Self {
             device: vb.device().clone(),
