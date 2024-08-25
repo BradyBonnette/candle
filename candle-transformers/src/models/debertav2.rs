@@ -99,8 +99,10 @@ enum PositionEmbeddingType {
 //     layer_norm_eps (`float`, optional, defaults to 1e-12):
 //         The epsilon used by the layer normalization layers.
 
-pub type Id2Label = HashMap<usize, String>;
-pub type Label2Id = HashMap<String, usize>;
+pub type Id2Label = HashMap<u32, String>;
+pub type Label2Id = HashMap<String, u32>;
+// pub type Id2Label = HashMap<usize, String>;
+// pub type Label2Id = HashMap<String, usize>;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Config {
@@ -289,7 +291,7 @@ impl DebertaV2Embeddings {
         // TEMP: Verified
         let seq_length = input_shape.last().unwrap().to_owned();
 
-        t!("self.position_ids", self.position_ids);
+        // t!("self.position_ids", self.position_ids);
 
         // TEMP: Verified
         let position_ids = match position_ids {
@@ -298,6 +300,9 @@ impl DebertaV2Embeddings {
             None => self.position_ids.narrow(1, 0, seq_length)?,
         };
 
+        // println!("position_ids: {}", position_ids.to_string());
+
+        // t!("position_ids", position_ids);
         // println!("position_ids dims: {:?}", position_ids.dims());
         // println!("position_ids: {}", position_ids.to_string());
 
@@ -316,7 +321,6 @@ impl DebertaV2Embeddings {
             None => self.word_embeddings.forward(input_ids.unwrap())?,
         };
 
-        // println!("input_embeds dims: {:?}", input_embeds.dims());
         // println!("input_embeds: {}", input_embeds.to_string());
 
         // TEMP: Verified
@@ -324,6 +328,8 @@ impl DebertaV2Embeddings {
             Some(emb) => emb.forward(&position_ids)?,
             None => Tensor::zeros_like(&input_embeds)?,
         };
+
+        // println!("position_embeddings: {}", position_embeddings.to_string());
 
         let mut embeddings = input_embeds;
 
@@ -347,6 +353,7 @@ impl DebertaV2Embeddings {
         // TEMP: Verified
         embeddings = self.layer_norm.forward(&embeddings)?;
 
+        // println!("embeddings 1 : {}", embeddings.to_string());
         // Temp: Verified
         if let Some(mask) = mask {
             let mut mask = mask.clone();
@@ -361,7 +368,11 @@ impl DebertaV2Embeddings {
             embeddings = embeddings.broadcast_mul(&mask)?;
         }
 
+        // println!("embeddings 2 : {}", embeddings.to_string());
+
         embeddings = self.dropout.forward(Some(&embeddings))?.unwrap();
+
+        // println!("embeddings 3 : {}", embeddings.to_string());
 
         Ok(embeddings)
     }
@@ -549,7 +560,8 @@ impl DebertaV2DisentangledSelfAttention {
             None => hidden_states,
         };
 
-        t!("attention_mask @ DSA forward", attention_mask);
+        // t!("attention_mask @ DSA forward", attention_mask);
+        // t!("query states @ DSA forward", query_states);
         // println!(
         //     "query_states: {:?}\n{}",
         //     query_states.dims(),
@@ -557,18 +569,21 @@ impl DebertaV2DisentangledSelfAttention {
         // );
 
         let query_layer = self.transpose_for_scores(&self.query_proj.forward(query_states)?)?;
+        t!("query_layer @ DSA forward", query_layer);
         // println!(
         //     "query_layer: {:?}\n{}",
         //     query_layer.dims(),
         //     query_layer.to_string()
         // );
         let key_layer = self.transpose_for_scores(&self.key_proj.forward(query_states)?)?;
+        t!("key_layer @ DSA forward", key_layer);
         // println!(
         //     "key_layer: {:?}\n{}",
         //     key_layer.dims(),
         //     key_layer.to_string()
         // );
         let value_layer = self.transpose_for_scores(&self.value_proj.forward(query_states)?)?;
+        t!("value_layer @ DSA forward", value_layer);
         // println!(
         //     "value_layer: {:?}\n{}",
         //     value_layer.dims(),
@@ -592,6 +607,8 @@ impl DebertaV2DisentangledSelfAttention {
             Tensor::new(&[(q_size * scale_factor) as f32], &self.device)?.sqrt()?
         };
 
+        t!("scale", scale);
+
         let mut attention_scores: Tensor = {
             let key_layer_transposed = key_layer.transpose(D::Minus1, D::Minus2)?;
             // println!(
@@ -604,6 +621,8 @@ impl DebertaV2DisentangledSelfAttention {
             // println!("div: {:?}\n{}", div.dims(), div.to_string());
             query_layer.matmul(&div)?
         };
+
+        t!("attention_scores", attention_scores);
 
         // println!(
         //     "attention_scores: {:?}\n{}",
@@ -621,6 +640,8 @@ impl DebertaV2DisentangledSelfAttention {
                 .forward(rel_embeddings)?
                 .unwrap();
 
+            // t!("rel_embeddings", rel_embeddings);
+
             rel_att = Some(self.disentangled_attention_bias(
                 query_layer,
                 key_layer,
@@ -634,7 +655,7 @@ impl DebertaV2DisentangledSelfAttention {
             attention_scores = attention_scores.broadcast_add(&rel_att.unwrap())?;
         }
 
-        t!("attention_scores", attention_scores);
+        t!("attention_scores 1", attention_scores);
 
         attention_scores = attention_scores.reshape((
             (),
@@ -643,12 +664,12 @@ impl DebertaV2DisentangledSelfAttention {
             attention_scores.dim(D::Minus1)?,
         ))?;
 
-        t!("attention_scores", attention_scores);
+        t!("attention_scores 2 ", attention_scores);
 
         let mut attention_probs =
             XSoftmax::apply(&attention_scores, &attention_mask, D::Minus1, &self.device)?;
 
-        t!("attention_probs", attention_probs);
+        t!("attention_probs 1", attention_probs);
 
         attention_probs =
             self.dropout
@@ -657,7 +678,7 @@ impl DebertaV2DisentangledSelfAttention {
                     "Dropout did not return a value".to_string(),
                 ))?;
 
-        t!("attention_probs", attention_probs);
+        t!("attention_probs 2", attention_probs);
 
         let mut context_layer = attention_probs
             .reshape((
@@ -667,7 +688,7 @@ impl DebertaV2DisentangledSelfAttention {
             ))?
             .matmul(&value_layer)?;
 
-        t!("context_layer", context_layer);
+        t!("context_layer 1", context_layer);
 
         context_layer = context_layer
             .reshape((
@@ -679,7 +700,7 @@ impl DebertaV2DisentangledSelfAttention {
             .permute((0, 2, 1, 3))?
             .contiguous()?;
 
-        t!("context_layer", context_layer);
+        t!("context_layer 2", context_layer);
 
         // let new_context_layer_shape = {
         //     let g = (1,2,3);
@@ -727,13 +748,51 @@ impl DebertaV2DisentangledSelfAttention {
 
     // fn transpose_for_scores(&self, x: &Tensor, attention_heads:)
     fn transpose_for_scores(&self, xs: &Tensor) -> candle::Result<Tensor> {
+        let dims = xs.dims().to_vec();
+        match dims.len() {
+            3 => {
+                let reshaped = xs.reshape((dims[0], dims[1], self.num_attention_heads, ()))?;
+
+                let new_dims = reshaped.dims();
+
+                reshaped.transpose(1, 2)?.contiguous()?.reshape((
+                    (),
+                    new_dims[1],
+                    new_dims.last().unwrap().clone(),
+                ))
+            }
+            shape => Err(candle::Error::Msg(format!(
+                "Invalid shape for transpose_for_scores. Expected 3 dimensions, got {shape}"
+            ))),
+        }
+        /*
+        println!("reshaped: {}", reshaped.to_string());
+
+        let mut f = reshaped.transpose(1, 2)?;
+
+        println!("transposed: {}", f.to_string());
+
+        f = f.contiguous()?;
+
+        println!("contiguous: {}", f.to_string());
+
+        let new_dims = reshaped.dims().to_vec();
+
+        f = f.reshape(((), new_dims[1], new_dims.last().unwrap().clone()))?;
+
+        println!("reshape: {}", f.to_string());
+        */
+        /*
         let mut new_x_shape = xs.dims().to_vec();
         new_x_shape.pop();
         new_x_shape.push(self.num_attention_heads);
         new_x_shape.push(self.attention_head_size);
         let mut xs = xs.reshape(new_x_shape.as_slice())?.transpose(1, 2)?;
+        t!("xs after reshape", xs);
         xs = xs.contiguous()?;
         xs.squeeze(0)
+        */
+        // todo!()
     }
 
     fn disentangled_attention_bias(
@@ -1365,6 +1424,11 @@ impl DebertaV2Encoder {
 
         let relative_pos = self.get_rel_pos(hidden_states, query_states, relative_pos)?;
 
+        t!(
+            "relative_pos @ DebertaV2Encoder",
+            relative_pos.as_ref().unwrap().to_string()
+        );
+
         // let next_kv = hidden_states;
         let mut next_kv: Tensor = hidden_states.clone();
         let rel_embeddings = self.get_rel_embedding()?;
@@ -1372,6 +1436,14 @@ impl DebertaV2Encoder {
 
         // let mut query_states = query_states;
         let mut query_states: Option<Tensor> = query_states.cloned();
+
+        t!("next_kv", next_kv.to_string());
+        t!(
+            "rel_embeddings",
+            rel_embeddings.as_ref().unwrap().to_string()
+        );
+        t!("output_states", output_states.to_string());
+        // t!("query_states", query_states.as_ref().unwrap().to_string());
 
         for (i, layer_module) in self.layer.iter().enumerate() {
             // TODO: Ignoring output_hidden_states for now
@@ -1563,6 +1635,7 @@ impl DebertaV2Model {
     }
 }
 
+#[derive(Debug)]
 pub struct SentencePiece {
     pub piece: String,
     pub id: u32,
@@ -1572,12 +1645,12 @@ pub struct SentencePiece {
 
 #[derive(Debug)]
 pub struct NERItem {
-    entity: String,
-    word: String,
-    score: f32,
-    start: u32,
-    end: u32,
-    index: usize,
+    pub entity: String,
+    pub word: String,
+    pub score: f32,
+    pub start: usize,
+    pub end: usize,
+    pub index: usize,
 }
 
 pub struct DebertaV2NERModel {
@@ -1668,28 +1741,81 @@ impl DebertaV2NERModel {
 
     pub fn entities(
         &self,
-        token_pieces: &Vec<SentencePiece>,
+        // token_pieces: &Vec<SentencePiece>,
+        input_ids: &Tensor,
         token_type_ids: Option<Tensor>,
         attention_mask: Option<Tensor>,
     ) -> candle::Result<Vec<Vec<NERItem>>> {
-        let token_ids: Vec<u32> = token_pieces.iter().map(|piece| piece.id).collect();
+        // pub fn entities(&self, encodings: &Vec<Encoding>) -> candle::Result<Vec<Vec<NERItem>>> {
+        // let token_ids: Vec<u32> = token_pieces.iter().map(|piece| piece.id).collect();
 
-        let input_ids: Tensor = Tensor::new(&token_ids[..], &self.device)?.unsqueeze(0)?;
+        // let input_ids: Tensor = Tensor::new(&token_ids[..], &self.device)?.unsqueeze(0)?;
 
-        let logits = self.forward(&input_ids, token_type_ids, attention_mask)?;
+        // println!("input_ids: {}", input_ids.to_string());
+        // println!("token_type_ids: {}", token_type_ids.unwrap().to_string());
+        // println!("attention_mask: {}", attention_mask.unwrap().to_string());
+        let logits = self.forward(input_ids, token_type_ids, attention_mask)?;
+
+        // t!("logits", logits);
+        // todo!("ajsdksja");
 
         let maxes = logits.max_keepdim(D::Minus1)?;
         let shifted_exp = {
             let logits_minus_maxes = logits.broadcast_sub(&maxes)?;
             logits_minus_maxes.exp()?
         };
-        let scores = {
+        let mut scores = {
             let sum = shifted_exp.sum_keepdim(D::Minus1)?;
             shifted_exp.broadcast_div(&sum)?
         };
-        let scores = scores.squeeze(0)?.to_vec2::<f32>()?;
-        let mut values: Vec<NERItem> = vec![];
 
+        let batch_scores = scores.argmax_keepdim(2)?.to_vec3::<u32>()?;
+        // let batch_scores = scores.argmax_keepdim(2)?.squeeze(1)?.to_vec2::<u32>()?;
+
+        let batch_results: Vec<Vec<NERItem>> = Vec::default();
+
+        for batch_score in batch_scores {
+            let values: Vec<NERItem> = Vec::default();
+
+            for score in batch_score {}
+            // each batch_score is a batch, e.g. two sentences = two batches
+            // batch_score[I] contains 1..input size for all batches
+            // batch_score[I][i]
+            println!("heh");
+        }
+
+        // let f = scores.argmax_keepdim(2)?;
+        // t!("maxes?", f);
+
+        // let g = f.to_vec3::<u32>()?;
+        // t!("scores 1", scores);
+        // scores = scores.squeeze(0)?;
+        // t!("scores 2", scores);
+        // scores = scores.squeeze(0)?;
+        // t!("scores 3", scores);
+        // let batch_scores = scores.to_vec3::<f32>()?;
+        // let scores = scores
+        //     .squeeze(0)?
+        //     .squeeze(0)?
+        //     .squeeze(0)?
+        //     .to_vec1::<f32>()?;
+        // let mut values: Vec<NERItem> = vec![];
+
+        // for batch_score in batch_scores {
+        // batch_score dimension 1 =
+        // let highest_score_idx = batch_score
+        //     .iter()
+        //     .enumerate()
+        //     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        //     .map(|(index, _)| index)
+        //     .unwrap();
+        // scores.max(dim)
+
+        // println!("highest score idx: {highest_score_idx}");
+        // }
+
+        todo!()
+        /*
         for (idx, piece) in token_pieces.iter().enumerate() {
             if piece.is_special {
                 continue;
@@ -1722,6 +1848,7 @@ impl DebertaV2NERModel {
         }
 
         Ok(vec![values])
+        */
     }
 }
 
