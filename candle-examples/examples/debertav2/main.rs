@@ -9,16 +9,17 @@ use std::path::PathBuf;
 
 use anyhow::ensure;
 use anyhow::{Error as E, Result};
-use candle::{Device, Tensor};
+use candle::{Device, Tensor, D};
 use candle_nn::VarBuilder;
 use candle_transformers::models::debertav2::{
-    Config as DebertaV2Config, DebertaV2NERModel, SentencePiece,
+    Config as DebertaV2Config, DebertaV2NERModel, NERItem, SentencePiece,
 };
 use candle_transformers::models::debertav2::{DebertaV2Model, Id2Label};
+use candle_transformers::models::stable_diffusion::attention;
 use clap::{Parser, ValueEnum};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use sentencepiece::SentencePieceProcessor;
-use tokenizers::PaddingParams;
+use tokenizers::{PaddingParams, Tokenizer, TokenizerBuilder};
 
 enum DebertaV2ModelType {
     Base(DebertaV2Model),
@@ -85,17 +86,16 @@ struct Args {
     /// Using this ignores model_id and revision args.
     #[arg(long)]
     model_path: Option<PathBuf>,
-
-    /// Specify SentencePiece model filename
-    #[arg(long, default_value = "spm.model")]
-    spm_filename: String,
+    // /// Specify SentencePiece model filename
+    // #[arg(long, default_value = "spm.model")]
+    // spm_filename: String,
 }
 
 impl Args {
     fn build_model_and_tokenizer(
         &self,
         id2label: Option<Id2Label>,
-    ) -> Result<(DebertaV2ModelType, DebertaV2Config, SentencePieceProcessor)> {
+    ) -> Result<(DebertaV2ModelType, DebertaV2Config, Tokenizer)> {
         let device = candle_examples::device(self.cpu)?;
 
         // Get files from either the HuggingFace API, or from a specified local directory.
@@ -111,7 +111,7 @@ impl Args {
                     );
 
                     let config = base_path.join("config.json");
-                    let tokenizer = base_path.join(self.spm_filename.as_str());
+                    let tokenizer = base_path.join("tokenizer.json");
                     let weights = if self.use_pth {
                         base_path.join("pytorch_model.bin")
                     } else {
@@ -128,7 +128,7 @@ impl Args {
                     let api = Api::new()?;
                     let api = api.repo(repo);
                     let config = api.get("config.json")?;
-                    let tokenizer = api.get(self.spm_filename.as_str())?;
+                    let tokenizer = api.get("tokenizer.json")?;
                     let weights = if self.use_pth {
                         api.get("pytorch_model.bin")?
                     } else {
@@ -141,7 +141,10 @@ impl Args {
         let config = std::fs::read_to_string(config_filename)?;
         let config: DebertaV2Config = serde_json::from_str(&config)?;
 
-        let tokenizer = SentencePieceProcessor::open(tokenizer_filename)?;
+        let mut tokenizer = Tokenizer::from_file(tokenizer_filename)
+            .map_err(|e| candle::Error::Msg(format!("Tokenizer error: {e}")))?;
+        tokenizer.with_padding(Some(PaddingParams::default()));
+        // let tokenizer = SentencePieceProcessor::open(tokenizer_filename)?;
 
         let vb = if self.use_pth {
             VarBuilder::from_pth(
@@ -204,10 +207,9 @@ fn main() -> Result<()> {
     use tracing_subscriber::prelude::*;
 
     let args = Args::parse();
-    println!("{:?}", args.sentences);
 
     let _guard = if args.tracing {
-        println!("tracing...");
+        // println!("tracing...");
         let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
         tracing_subscriber::registry().with(chrome_layer).init();
         Some(guard)
@@ -217,9 +219,10 @@ fn main() -> Result<()> {
 
     // let start = std::time::Instant::now();
 
-    let (model_type, model_config, tokenizer) = args.build_model_and_tokenizer(None)?;
-    // let device = get_device(&model_type);
+    let (model_type, model_config, mut tokenizer) = args.build_model_and_tokenizer(None)?;
+    let device = get_device(&model_type);
 
+    /*
     let mut token_pieces: Vec<candle_transformers::models::debertav2::SentencePiece> = tokenizer
         .encode(args.sentences.first().unwrap())?
         .iter()
@@ -248,13 +251,131 @@ fn main() -> Result<()> {
         is_special: true,
     });
 
-    assert!(
-        token_pieces.len() - 2 <= model_config.max_position_embeddings,
-        "Number of tokens produced for sentence ```{}``` ({} tokens) is larger than the model's configuration for max embeddings ({} tokens).",
-        args.sentences.first().unwrap(),
-        token_pieces.len(),
-        model_config.max_position_embeddings
-    );
+    // println!("Token pieces: {:?}", token_pieces);
+    */
+    // TEMP TEMP TEMP
+    // use tokenizers::tokenizer::{Result, Tokenizer};
+
+    // let mut tokenizer = Tokenizer::from_pretrained(args.model_id, None).expect("ohno");
+    // tokenizer.with_padding(Some(PaddingParams::default()));
+    // let encoding = tokenizer
+    //     .encode(args.sentences.first().unwrap().as_str(), false)
+    //     .expect("ohno");
+
+    // println!("{:?}", args.sentences);
+    let tokenizer_encodings = tokenizer.encode_batch(args.sentences, true).expect("ohno");
+
+    let mut encoding_stack: Vec<Tensor> = Vec::default();
+    let mut attention_mask_stack: Vec<Tensor> = Vec::default();
+    let mut token_type_id_stack: Vec<Tensor> = Vec::default();
+    // let mut special_tokens_stack: Vec<Tensor> = Vec::default();
+
+    for encoding in &tokenizer_encodings {
+        // println!("Encoding: {:?}", encoding.get_tokens());
+        // println!("Offsets: {:?}", encoding.get_offsets());
+        // println!("ids: {:?}", encoding.get_ids());
+        encoding_stack.push(Tensor::new(encoding.get_ids(), &device)?);
+        attention_mask_stack.push(Tensor::new(encoding.get_attention_mask(), &device)?);
+        token_type_id_stack.push(Tensor::new(encoding.get_type_ids(), &device)?);
+        // special_tokens_stack.push(Tensor::new(encoding.get_special_tokens_mask(), &device)?);
+    }
+
+    // for tensor in &encodings_stack {
+    //     println!("{}", tensor.to_string());
+    // }
+
+    let encodings = Tensor::stack(&encoding_stack[..], 0)?;
+    let attention_masks = Tensor::stack(&attention_mask_stack[..], 0)?;
+    let token_type_ids = Tensor::stack(&token_type_id_stack[..], 0)?;
+    // let special_tokens_stack = Tensor::stack(&special_tokens_stack[..], 0)?;
+
+    // println!("Tensors: {}", encodings.to_string());
+
+    match model_type {
+        DebertaV2ModelType::Base(_base_model) => todo!(),
+        DebertaV2ModelType::NER(ner_model) => {
+            // let entities =
+            //     ner_model.entities(&encodings, Some(token_type_ids), Some(attention_masks))?;
+            // let entities = ner_model.entities(&encodings)?;
+            let logits =
+                ner_model.forward(&encodings, Some(token_type_ids), Some(attention_masks))?;
+
+            let maxes = logits.max_keepdim(D::Minus1)?;
+            let shifted_exp = {
+                let logits_minus_maxes = logits.broadcast_sub(&maxes)?;
+                logits_minus_maxes.exp()?
+            };
+            let mut scores = {
+                let sum = shifted_exp.sum_keepdim(D::Minus1)?;
+                shifted_exp.broadcast_div(&sum)?
+            };
+
+            // println!("Scores:\n{}", scores.to_string());
+
+            // let max_scores = scores.max(D::Minus1)?.to_vec2::<f32>()?;
+            // let max_scores = scores.max_keepdim(D::Minus1)?.to_vec3::<f32>()?;
+
+            // println!("Max Scores:\n{:?}", max_scores);
+
+            let max_scores = scores.max(D::Minus1)?.to_vec2::<f32>()?;
+
+            // println!("Max Scores:\n{:?}", max_scores);
+
+            let batch_scores = scores.argmax_keepdim(2)?.to_vec3::<u32>()?;
+
+            let mut batch_results: Vec<Vec<NERItem>> = Vec::default();
+            // println!("{:?}", batch_scores);
+
+            for (batch_idx, batch_score) in batch_scores.iter().enumerate() {
+                let mut batch_result: Vec<NERItem> = Vec::default();
+                for (idx, input_label) in batch_score.iter().enumerate() {
+                    if tokenizer_encodings[batch_idx].get_special_tokens_mask()[idx] == 1 {
+                        continue;
+                    }
+
+                    let label = model_config.id2label.as_ref().unwrap()[&input_label[0]].clone();
+
+                    if label == "O" {
+                        continue;
+                    }
+                    // println!(
+                    //     "entity {}",
+                    //     model_config.id2label.as_ref().unwrap()[&input_label[0]]
+                    // );
+                    // println!("word {}", tokenizer_encodings[batch_idx].get_tokens()[idx]);
+                    // println!(
+                    //     "span start {}",
+                    //     tokenizer_encodings[batch_idx].get_offsets()[idx].0
+                    // );
+                    // println!(
+                    //     "span end {}",
+                    //     tokenizer_encodings[batch_idx].get_offsets()[idx].1
+                    // );
+                    // println!("index {}", idx);
+                    // todo!()
+                    batch_result.push(NERItem {
+                        entity: label,
+                        word: tokenizer_encodings[batch_idx].get_tokens()[idx].clone(),
+                        score: max_scores[batch_idx][idx],
+                        start: tokenizer_encodings[batch_idx].get_offsets()[idx].0,
+                        end: tokenizer_encodings[batch_idx].get_offsets()[idx].1,
+                        index: idx,
+                    })
+                }
+                batch_results.push(batch_result);
+            }
+
+            println!("{:?}", batch_results);
+        }
+    }
+
+    // assert!(
+    //     token_pieces.len() - 2 <= model_config.max_position_embeddings,
+    //     "Number of tokens produced for sentence ```{}``` ({} tokens) is larger than the model's configuration for max embeddings ({} tokens).",
+    //     args.sentences.first().unwrap(),
+    //     token_pieces.len(),
+    //     model_config.max_position_embeddings
+    // );
 
     // let mut token_ids: Vec<u32> = vec![tokenizer.bos_id().unwrap()];
     // token_pieces
@@ -264,13 +385,13 @@ fn main() -> Result<()> {
 
     // let input: Tensor = Tensor::new(&token_ids[..], &device)?.unsqueeze(0)?;
 
-    match model_type {
-        DebertaV2ModelType::Base(_base_model) => todo!(),
-        DebertaV2ModelType::NER(ner_model) => {
-            let entities = ner_model.entities(&token_pieces, None, None)?;
-            println!("{:?}", entities);
-        }
-    }
+    // match model_type {
+    //     DebertaV2ModelType::Base(_base_model) => todo!(),
+    //     DebertaV2ModelType::NER(ner_model) => {
+    //         let entities = ner_model.entities(&token_pieces, None, None)?;
+    //         println!("{:?}", entities);
+    //     }
+    // }
 
     // let device = match model {
     //     DebertaV2ModelType::Base(base_model) => base_model.device,
