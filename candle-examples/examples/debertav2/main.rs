@@ -282,7 +282,7 @@ fn main() -> Result<()> {
         1 => {
             let encoding = tokenizer
                 .encode(args.sentences.first().unwrap().as_str(), true)
-                .expect("ohno");
+                .map_err(E::msg)?;
 
             ModelInput {
                 input_ids: Tensor::new(&encoding.get_ids()[..], &device)?.unsqueeze(0)?,
@@ -293,7 +293,9 @@ fn main() -> Result<()> {
             }
         }
         _ => {
-            let tokenizer_encodings = tokenizer.encode_batch(args.sentences, true).expect("ohno");
+            let tokenizer_encodings = tokenizer
+                .encode_batch(args.sentences, true)
+                .map_err(E::msg)?;
 
             let mut encoding_stack: Vec<Tensor> = Vec::default();
             let mut attention_mask_stack: Vec<Tensor> = Vec::default();
