@@ -11,6 +11,7 @@ use anyhow::ensure;
 use anyhow::{Error as E, Result};
 use candle::{Device, Tensor, D};
 use candle_nn::VarBuilder;
+use candle_transformers::models::based::Model;
 use candle_transformers::models::debertav2::{
     Config as DebertaV2Config, DebertaV2NERModel, NERItem, SentencePiece,
 };
@@ -19,7 +20,7 @@ use candle_transformers::models::stable_diffusion::attention;
 use clap::{Parser, ValueEnum};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use sentencepiece::SentencePieceProcessor;
-use tokenizers::{PaddingParams, Tokenizer, TokenizerBuilder};
+use tokenizers::{Encoding, PaddingParams, Tokenizer, TokenizerBuilder};
 
 enum DebertaV2ModelType {
     Base(DebertaV2Model),
@@ -186,20 +187,32 @@ fn get_device(model_type: &DebertaV2ModelType) -> &Device {
     }
 }
 
-fn special_tokens(spp: &SentencePieceProcessor) -> HashMap<u32, bool> {
-    let mut special_tokens = HashMap::<u32, bool>::new();
-    if let Some(id) = spp.bos_id() {
-        special_tokens.insert(id, true);
-    }
-    if let Some(id) = spp.eos_id() {
-        special_tokens.insert(id, true);
-    }
-    if let Some(id) = spp.pad_id() {
-        special_tokens.insert(id, true);
-    }
-    special_tokens.insert(spp.unk_id(), true);
+// fn special_tokens(spp: &SentencePieceProcessor) -> HashMap<u32, bool> {
+//     let mut special_tokens = HashMap::<u32, bool>::new();
+//     if let Some(id) = spp.bos_id() {
+//         special_tokens.insert(id, true);
+//     }
+//     if let Some(id) = spp.eos_id() {
+//         special_tokens.insert(id, true);
+//     }
+//     if let Some(id) = spp.pad_id() {
+//         special_tokens.insert(id, true);
+//     }
+//     special_tokens.insert(spp.unk_id(), true);
 
-    special_tokens
+//     special_tokens
+// }
+
+enum InputEncoding {
+    Single(Encoding),
+    Batch(Vec<Encoding>),
+}
+
+struct ModelInput {
+    encoding: InputEncoding,
+    input_ids: Tensor,
+    attention_mask: Tensor,
+    token_type_ids: Tensor,
 }
 
 fn main() -> Result<()> {
@@ -209,7 +222,6 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let _guard = if args.tracing {
-        // println!("tracing...");
         let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
         tracing_subscriber::registry().with(chrome_layer).init();
         Some(guard)
@@ -219,7 +231,7 @@ fn main() -> Result<()> {
 
     // let start = std::time::Instant::now();
 
-    let (model_type, model_config, mut tokenizer) = args.build_model_and_tokenizer(None)?;
+    let (model_type, model_config, tokenizer) = args.build_model_and_tokenizer(None)?;
     let device = get_device(&model_type);
 
     /*
@@ -263,109 +275,150 @@ fn main() -> Result<()> {
     //     .expect("ohno");
 
     // println!("{:?}", args.sentences);
-    let tokenizer_encodings = tokenizer.encode_batch(args.sentences, true).expect("ohno");
 
-    let mut encoding_stack: Vec<Tensor> = Vec::default();
-    let mut attention_mask_stack: Vec<Tensor> = Vec::default();
-    let mut token_type_id_stack: Vec<Tensor> = Vec::default();
-    // let mut special_tokens_stack: Vec<Tensor> = Vec::default();
+    // Single sentence passed in means we don't need batching.
+    // Multiple sentences passed in means we have can/should do batching.
+    let model_input: ModelInput = match args.sentences.len() {
+        1 => {
+            let encoding = tokenizer
+                .encode(args.sentences.first().unwrap().as_str(), true)
+                .expect("ohno");
 
-    for encoding in &tokenizer_encodings {
-        // println!("Encoding: {:?}", encoding.get_tokens());
-        // println!("Offsets: {:?}", encoding.get_offsets());
-        // println!("ids: {:?}", encoding.get_ids());
-        encoding_stack.push(Tensor::new(encoding.get_ids(), &device)?);
-        attention_mask_stack.push(Tensor::new(encoding.get_attention_mask(), &device)?);
-        token_type_id_stack.push(Tensor::new(encoding.get_type_ids(), &device)?);
-        // special_tokens_stack.push(Tensor::new(encoding.get_special_tokens_mask(), &device)?);
-    }
+            ModelInput {
+                input_ids: Tensor::new(&encoding.get_ids()[..], &device)?.unsqueeze(0)?,
+                attention_mask: Tensor::new(&encoding.get_attention_mask()[..], &device)?
+                    .unsqueeze(0)?,
+                token_type_ids: Tensor::new(&encoding.get_type_ids()[..], &device)?.unsqueeze(0)?,
+                encoding: InputEncoding::Single(encoding),
+            }
+        }
+        _ => {
+            let tokenizer_encodings = tokenizer.encode_batch(args.sentences, true).expect("ohno");
 
-    // for tensor in &encodings_stack {
-    //     println!("{}", tensor.to_string());
-    // }
+            let mut encoding_stack: Vec<Tensor> = Vec::default();
+            let mut attention_mask_stack: Vec<Tensor> = Vec::default();
+            let mut token_type_id_stack: Vec<Tensor> = Vec::default();
 
-    let encodings = Tensor::stack(&encoding_stack[..], 0)?;
-    let attention_masks = Tensor::stack(&attention_mask_stack[..], 0)?;
-    let token_type_ids = Tensor::stack(&token_type_id_stack[..], 0)?;
-    // let special_tokens_stack = Tensor::stack(&special_tokens_stack[..], 0)?;
+            for encoding in &tokenizer_encodings {
+                encoding_stack.push(Tensor::new(encoding.get_ids(), &device)?);
+                attention_mask_stack.push(Tensor::new(encoding.get_attention_mask(), &device)?);
+                token_type_id_stack.push(Tensor::new(encoding.get_type_ids(), &device)?);
+            }
 
-    // println!("Tensors: {}", encodings.to_string());
+            ModelInput {
+                encoding: InputEncoding::Batch(tokenizer_encodings),
+                input_ids: Tensor::stack(&encoding_stack[..], 0)?,
+                attention_mask: Tensor::stack(&attention_mask_stack[..], 0)?,
+                token_type_ids: Tensor::stack(&token_type_id_stack[..], 0)?,
+            }
+        }
+    };
 
     match model_type {
         DebertaV2ModelType::Base(_base_model) => todo!(),
         DebertaV2ModelType::NER(ner_model) => {
-            // let entities =
-            //     ner_model.entities(&encodings, Some(token_type_ids), Some(attention_masks))?;
-            // let entities = ner_model.entities(&encodings)?;
-            let logits =
-                ner_model.forward(&encodings, Some(token_type_ids), Some(attention_masks))?;
+            let logits = ner_model.forward(
+                &model_input.input_ids,
+                Some(model_input.token_type_ids),
+                Some(model_input.attention_mask),
+            )?;
 
-            let maxes = logits.max_keepdim(D::Minus1)?;
-            let shifted_exp = {
-                let logits_minus_maxes = logits.broadcast_sub(&maxes)?;
-                logits_minus_maxes.exp()?
-            };
-            let mut scores = {
-                let sum = shifted_exp.sum_keepdim(D::Minus1)?;
-                shifted_exp.broadcast_div(&sum)?
-            };
+            match model_input.encoding {
+                InputEncoding::Single(tokenizer_encoding) => {
+                    let maxes = logits.max_keepdim(D::Minus1)?;
+                    let shifted_exp = {
+                        let logits_minus_maxes = logits.broadcast_sub(&maxes)?;
+                        logits_minus_maxes.exp()?
+                    };
+                    let scores = {
+                        let sum = shifted_exp.sum_keepdim(D::Minus1)?;
+                        shifted_exp.broadcast_div(&sum)?.squeeze(0)?
+                    };
 
-            // println!("Scores:\n{}", scores.to_string());
+                    // Differences start here?
+                    let predicted_label_ids = scores.argmax(1)?.to_vec1::<u32>()?;
+                    let max_scores = scores.max(1)?.to_vec1::<f32>()?;
+                    let id2label = model_config.id2label.as_ref().unwrap();
+                    let mut result: Vec<NERItem> = Vec::default();
 
-            // let max_scores = scores.max(D::Minus1)?.to_vec2::<f32>()?;
-            // let max_scores = scores.max_keepdim(D::Minus1)?.to_vec3::<f32>()?;
+                    for (idx, predicted_label_id) in predicted_label_ids.iter().enumerate() {
+                        let label = id2label.get(&predicted_label_id).unwrap();
 
-            // println!("Max Scores:\n{:?}", max_scores);
+                        if label == "O" {
+                            continue;
+                        }
 
-            let max_scores = scores.max(D::Minus1)?.to_vec2::<f32>()?;
-
-            // println!("Max Scores:\n{:?}", max_scores);
-
-            let batch_scores = scores.argmax_keepdim(2)?.to_vec3::<u32>()?;
-
-            let mut batch_results: Vec<Vec<NERItem>> = Vec::default();
-            // println!("{:?}", batch_scores);
-
-            for (batch_idx, batch_score) in batch_scores.iter().enumerate() {
-                let mut batch_result: Vec<NERItem> = Vec::default();
-                for (idx, input_label) in batch_score.iter().enumerate() {
-                    if tokenizer_encodings[batch_idx].get_special_tokens_mask()[idx] == 1 {
-                        continue;
+                        result.push(NERItem {
+                            entity: label.clone(),
+                            word: tokenizer_encoding.get_tokens()[idx].clone(),
+                            score: max_scores[idx],
+                            start: tokenizer_encoding.get_offsets()[idx].0,
+                            end: tokenizer_encoding.get_offsets()[idx].1,
+                            index: idx,
+                        });
                     }
-
-                    let label = model_config.id2label.as_ref().unwrap()[&input_label[0]].clone();
-
-                    if label == "O" {
-                        continue;
-                    }
-                    // println!(
-                    //     "entity {}",
-                    //     model_config.id2label.as_ref().unwrap()[&input_label[0]]
-                    // );
-                    // println!("word {}", tokenizer_encodings[batch_idx].get_tokens()[idx]);
-                    // println!(
-                    //     "span start {}",
-                    //     tokenizer_encodings[batch_idx].get_offsets()[idx].0
-                    // );
-                    // println!(
-                    //     "span end {}",
-                    //     tokenizer_encodings[batch_idx].get_offsets()[idx].1
-                    // );
-                    // println!("index {}", idx);
-                    // todo!()
-                    batch_result.push(NERItem {
-                        entity: label,
-                        word: tokenizer_encodings[batch_idx].get_tokens()[idx].clone(),
-                        score: max_scores[batch_idx][idx],
-                        start: tokenizer_encodings[batch_idx].get_offsets()[idx].0,
-                        end: tokenizer_encodings[batch_idx].get_offsets()[idx].1,
-                        index: idx,
-                    })
+                    println!("{:?}", result);
                 }
-                batch_results.push(batch_result);
-            }
+                InputEncoding::Batch(tokenizer_encodings) => {
+                    let maxes = logits.max_keepdim(D::Minus1)?;
+                    let shifted_exp = {
+                        let logits_minus_maxes = logits.broadcast_sub(&maxes)?;
+                        logits_minus_maxes.exp()?
+                    };
+                    let scores = {
+                        let sum = shifted_exp.sum_keepdim(D::Minus1)?;
+                        shifted_exp.broadcast_div(&sum)?
+                    };
 
-            println!("{:?}", batch_results);
+                    let max_scores = scores.max(D::Minus1)?.to_vec2::<f32>()?;
+
+                    let batch_scores = scores.argmax_keepdim(2)?.to_vec3::<u32>()?;
+
+                    let mut batch_results: Vec<Vec<NERItem>> = Vec::default();
+
+                    for (batch_idx, batch_score) in batch_scores.iter().enumerate() {
+                        let mut batch_result: Vec<NERItem> = Vec::default();
+                        for (idx, input_label) in batch_score.iter().enumerate() {
+                            if tokenizer_encodings[batch_idx].get_special_tokens_mask()[idx] == 1 {
+                                continue;
+                            }
+
+                            let label =
+                                model_config.id2label.as_ref().unwrap()[&input_label[0]].clone();
+
+                            if label == "O" {
+                                continue;
+                            }
+                            // println!(
+                            //     "entity {}",
+                            //     model_config.id2label.as_ref().unwrap()[&input_label[0]]
+                            // );
+                            // println!("word {}", tokenizer_encodings[batch_idx].get_tokens()[idx]);
+                            // println!(
+                            //     "span start {}",
+                            //     tokenizer_encodings[batch_idx].get_offsets()[idx].0
+                            // );
+                            // println!(
+                            //     "span end {}",
+                            //     tokenizer_encodings[batch_idx].get_offsets()[idx].1
+                            // );
+                            // println!("index {}", idx);
+                            // todo!()
+                            batch_result.push(NERItem {
+                                entity: label,
+                                word: tokenizer_encodings[batch_idx].get_tokens()[idx].clone(),
+                                score: max_scores[batch_idx][idx],
+                                start: tokenizer_encodings[batch_idx].get_offsets()[idx].0,
+                                end: tokenizer_encodings[batch_idx].get_offsets()[idx].1,
+                                index: idx,
+                            })
+                        }
+                        batch_results.push(batch_result);
+                    }
+
+                    println!("{:?}", batch_results);
+                }
+            }
         }
     }
 
