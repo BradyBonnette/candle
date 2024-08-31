@@ -1,11 +1,3 @@
-// TEMPORARY
-macro_rules! t {
-    ($name:expr, $tensor:expr) => {
-        // println!("\n{}:\n{}", $name, $tensor.to_string());
-    };
-}
-// TEMPORARY
-
 use std::collections::HashMap;
 
 use candle::{DType, Device, Module, Tensor, D};
@@ -161,28 +153,23 @@ where
     // Ok(s.split('|').map(String::from).collect())
 }
 
-// TODO: Dropout is probably not needed for now since this will primarily be used
+// NOTE: Dropout is probably not needed for now since this will primarily be used
 // in inferencing. However, for training/fine-tuning it will be necessary.
 pub struct StableDropout {
-    drop_prob: f64,
-    count: usize,
+    _drop_prob: f64,
+    _count: usize,
 }
 
 impl StableDropout {
     pub fn new(drop_prob: f64) -> Self {
         Self {
-            drop_prob,
-            count: 0,
+            _drop_prob: drop_prob,
+            _count: 0,
         }
     }
 
-    // pub fn forward(&self, x: Tensor) -> candle::Result<Tensor> {
     pub fn forward(&self, x: Option<&Tensor>) -> candle::Result<Option<Tensor>> {
         Ok(x.cloned())
-
-        // Ok(x)
-        // pub fn forward(&self, x: Option<&Tensor>) -> candle::Result<Tensor> {
-        // Ok(x.cloned())
     }
 }
 
@@ -405,35 +392,35 @@ fn masked_fill(input: &Tensor, mask: &Tensor, value: f32) -> candle::Result<Tens
 }
 */
 
-fn masked_fill(target: &Tensor, mask: &Tensor, value: f32) -> candle::Result<Tensor> {
-    todo!()
-}
+// fn masked_fill(target: &Tensor, mask: &Tensor, value: f32) -> candle::Result<Tensor> {
+//     todo!()
+// }
 
 struct XSoftmax {}
 
 impl XSoftmax {
     pub fn apply(input: &Tensor, mask: &Tensor, dim: D, device: &Device) -> candle::Result<Tensor> {
         // t!("input", input);
-        t!("attention_mask @ XSoftmax apply", mask);
+        // t!("attention_mask @ XSoftmax apply", mask);
         // NOTE: At the time of this writing, candle does not have a logical-not operator.
         let mut rmask = mask.broadcast_as(input.shape())?.to_dtype(DType::F32)?;
-        t!("rmask", rmask);
+        // t!("rmask", rmask);
         rmask = rmask
-            .broadcast_lt(&Tensor::new(&[1.0 as f32], device)?)?
+            .broadcast_lt(&Tensor::new(&[1.0_f32], device)?)?
             .to_dtype(DType::U8)?;
-        t!("rmask", rmask);
+        // t!("rmask", rmask);
 
         // masked fill?
         let min_value_tensor = Tensor::new(&[f32::MIN], device)?.broadcast_as(input.shape())?;
-        let mut output = rmask.where_cond(&min_value_tensor, &input)?;
+        let mut output = rmask.where_cond(&min_value_tensor, input)?;
 
-        t!("output", output);
+        // t!("output", output);
         output = candle_nn::ops::softmax(&output, dim)?;
-        t!("output", output);
+        // t!("output", output);
 
         let t_zeroes = Tensor::new(&[0f32], device)?.broadcast_as(input.shape())?;
         output = rmask.where_cond(&t_zeroes, &output)?;
-        t!("output", output);
+        // t!("output", output);
 
         Ok(output)
     }
@@ -443,7 +430,7 @@ impl XSoftmax {
 pub struct DebertaV2DisentangledSelfAttention {
     config: Config,
     num_attention_heads: usize,
-    attention_head_size: usize,
+    // attention_head_size: usize,
     query_proj: candle_nn::Linear,
     key_proj: candle_nn::Linear,
     value_proj: candle_nn::Linear,
@@ -490,7 +477,7 @@ impl DebertaV2DisentangledSelfAttention {
         let mut max_relative_positions = config.max_relative_positions;
 
         let mut pos_ebd_size: isize = 0;
-        let mut position_buckets = config.position_buckets.unwrap_or(-1);
+        let position_buckets = config.position_buckets.unwrap_or(-1);
         let mut pos_dropout: Option<StableDropout> = None;
         let mut pos_key_proj: Option<candle_nn::Linear> = None;
         let mut pos_query_proj: Option<candle_nn::Linear> = None;
@@ -530,7 +517,7 @@ impl DebertaV2DisentangledSelfAttention {
         Ok(Self {
             config,
             num_attention_heads,
-            attention_head_size,
+            // attention_head_size,
             query_proj,
             key_proj,
             value_proj,
@@ -569,21 +556,21 @@ impl DebertaV2DisentangledSelfAttention {
         // );
 
         let query_layer = self.transpose_for_scores(&self.query_proj.forward(query_states)?)?;
-        t!("query_layer @ DSA forward", query_layer);
+        // t!("query_layer @ DSA forward", query_layer);
         // println!(
         //     "query_layer: {:?}\n{}",
         //     query_layer.dims(),
         //     query_layer.to_string()
         // );
         let key_layer = self.transpose_for_scores(&self.key_proj.forward(query_states)?)?;
-        t!("key_layer @ DSA forward", key_layer);
+        // t!("key_layer @ DSA forward", key_layer);
         // println!(
         //     "key_layer: {:?}\n{}",
         //     key_layer.dims(),
         //     key_layer.to_string()
         // );
         let value_layer = self.transpose_for_scores(&self.value_proj.forward(query_states)?)?;
-        t!("value_layer @ DSA forward", value_layer);
+        // t!("value_layer @ DSA forward", value_layer);
         // println!(
         //     "value_layer: {:?}\n{}",
         //     value_layer.dims(),
@@ -607,7 +594,7 @@ impl DebertaV2DisentangledSelfAttention {
             Tensor::new(&[(q_size * scale_factor) as f32], &self.device)?.sqrt()?
         };
 
-        t!("scale", scale);
+        // t!("scale", scale);
 
         let mut attention_scores: Tensor = {
             let key_layer_transposed = key_layer.transpose(D::Minus1, D::Minus2)?;
@@ -622,7 +609,7 @@ impl DebertaV2DisentangledSelfAttention {
             query_layer.matmul(&div)?
         };
 
-        t!("attention_scores", attention_scores);
+        // t!("attention_scores", attention_scores);
 
         // println!(
         //     "attention_scores: {:?}\n{}",
@@ -655,7 +642,7 @@ impl DebertaV2DisentangledSelfAttention {
             attention_scores = attention_scores.broadcast_add(&rel_att.unwrap())?;
         }
 
-        t!("attention_scores 1", attention_scores);
+        // t!("attention_scores 1", attention_scores);
 
         attention_scores = attention_scores.reshape((
             (),
@@ -664,12 +651,12 @@ impl DebertaV2DisentangledSelfAttention {
             attention_scores.dim(D::Minus1)?,
         ))?;
 
-        t!("attention_scores 2 ", attention_scores);
+        // t!("attention_scores 2 ", attention_scores);
 
         let mut attention_probs =
-            XSoftmax::apply(&attention_scores, &attention_mask, D::Minus1, &self.device)?;
+            XSoftmax::apply(&attention_scores, attention_mask, D::Minus1, &self.device)?;
 
-        t!("attention_probs 1", attention_probs);
+        // t!("attention_probs 1", attention_probs);
 
         attention_probs =
             self.dropout
@@ -678,7 +665,7 @@ impl DebertaV2DisentangledSelfAttention {
                     "Dropout did not return a value".to_string(),
                 ))?;
 
-        t!("attention_probs 2", attention_probs);
+        // t!("attention_probs 2", attention_probs);
 
         let mut context_layer = attention_probs
             .reshape((
@@ -688,7 +675,7 @@ impl DebertaV2DisentangledSelfAttention {
             ))?
             .matmul(&value_layer)?;
 
-        t!("context_layer 1", context_layer);
+        // t!("context_layer 1", context_layer);
 
         context_layer = context_layer
             .reshape((
@@ -700,7 +687,7 @@ impl DebertaV2DisentangledSelfAttention {
             .permute((0, 2, 1, 3))?
             .contiguous()?;
 
-        t!("context_layer 2", context_layer);
+        // t!("context_layer 2", context_layer);
 
         // let new_context_layer_shape = {
         //     let g = (1,2,3);
@@ -741,7 +728,7 @@ impl DebertaV2DisentangledSelfAttention {
             }
         };
 
-        t!("context_layer", context_layer);
+        // t!("context_layer", context_layer);
 
         Ok(context_layer)
     }
@@ -758,7 +745,7 @@ impl DebertaV2DisentangledSelfAttention {
                 reshaped.transpose(1, 2)?.contiguous()?.reshape((
                     (),
                     new_dims[1],
-                    new_dims.last().unwrap().clone(),
+                    *new_dims.last().unwrap(),
                 ))
             }
             shape => Err(candle::Error::Msg(format!(
@@ -816,7 +803,7 @@ impl DebertaV2DisentangledSelfAttention {
             relative_pos.cloned().unwrap()
         };
 
-        t!("relative_pos", relative_pos);
+        // t!("relative_pos", relative_pos);
 
         relative_pos = match relative_pos.dims().len() {
             2 => relative_pos.unsqueeze(0)?.unsqueeze(0)?,
@@ -828,7 +815,7 @@ impl DebertaV2DisentangledSelfAttention {
             }
         };
 
-        t!("relative_pos", relative_pos);
+        // t!("relative_pos", relative_pos);
 
         let att_span = self.pos_ebd_size;
 
@@ -847,7 +834,7 @@ impl DebertaV2DisentangledSelfAttention {
             sliced.unsqueeze(0)?
         };
 
-        t!("rel_embeddings", rel_embeddings);
+        // t!("rel_embeddings", rel_embeddings);
 
         let mut pos_query_layer: Option<Tensor> = None;
         let mut pos_key_layer: Option<Tensor> = None;
@@ -855,18 +842,18 @@ impl DebertaV2DisentangledSelfAttention {
         let repeat_with = query_layer.dim(0)? / self.num_attention_heads;
         if self.share_att_key {
             let qproj = self.query_proj.forward(&rel_embeddings)?;
-            t!("qproj", qproj);
+            // t!("qproj", qproj);
             let transposed = self.transpose_for_scores(&qproj)?;
-            t!("transposed", transposed);
+            // t!("transposed", transposed);
             pos_query_layer = Some(transposed.repeat(repeat_with)?);
-            t!("pos_query_layer", pos_query_layer.as_ref().unwrap());
+            // t!("pos_query_layer", pos_query_layer.as_ref().unwrap());
 
             let kproj = self.key_proj.forward(&rel_embeddings)?;
-            t!("kproj", kproj);
+            // t!("kproj", kproj);
             let transposed = self.transpose_for_scores(&kproj)?;
-            t!("transposd", transposed);
+            // t!("transposd", transposed);
             pos_key_layer = Some(transposed.repeat(repeat_with)?);
-            t!("pos_key_layer", pos_key_layer.as_ref().unwrap());
+            // t!("pos_key_layer", pos_key_layer.as_ref().unwrap());
         } else {
             if self.config.pos_att_type.contains(&"c2p".to_string()) {
                 let kproj = self
@@ -894,8 +881,8 @@ impl DebertaV2DisentangledSelfAttention {
             }
         }
 
-        t!("pos_key_layer", pos_key_layer.as_ref().unwrap());
-        t!("pos_query_layer", pos_query_layer.as_ref().unwrap());
+        // t!("pos_key_layer", pos_key_layer.as_ref().unwrap());
+        // t!("pos_query_layer", pos_query_layer.as_ref().unwrap());
 
         let mut score = Tensor::new(&[0 as f32], &self.device)?;
 
@@ -909,14 +896,14 @@ impl DebertaV2DisentangledSelfAttention {
                 Tensor::new(&[(layer_size * scale_factor) as f32], &self.device)?.sqrt()?
             };
 
-            t!("scale", scale);
+            // t!("scale", scale);
 
             let mut c2p_att = {
                 let transposed = pos_key_layer.transpose(D::Minus1, D::Minus2)?;
                 query_layer.matmul(&transposed)?
             };
 
-            t!("c2p_att", c2p_att);
+            // t!("c2p_att", c2p_att);
 
             let c2p_pos = {
                 // let att_span_t = Tensor::new(&[att_span as f32], &self.device)?;
@@ -925,7 +912,7 @@ impl DebertaV2DisentangledSelfAttention {
                 rel_pos_plus_att_span.clamp(0 as f32, (att_span * 2 - 1) as f32)?
             };
 
-            t!("c2p_pos", c2p_pos);
+            // t!("c2p_pos", c2p_pos);
 
             c2p_att = {
                 let gather_idx = c2p_pos
@@ -937,18 +924,18 @@ impl DebertaV2DisentangledSelfAttention {
                     ])?
                     .contiguous()?;
 
-                t!("gather_idx", gather_idx);
+                // t!("gather_idx", gather_idx);
 
                 c2p_att.gather(&gather_idx, D::Minus1)?
             };
 
-            t!("c2p_att", c2p_att);
+            // t!("c2p_att", c2p_att);
 
             score = score.broadcast_add(
                 &c2p_att.broadcast_div(scale.to_dtype(c2p_att.dtype())?.as_ref())?,
             )?;
 
-            t!("score", score);
+            // t!("score", score);
         }
 
         if self.config.pos_att_type.contains(&"p2c".to_string()) {
@@ -960,7 +947,7 @@ impl DebertaV2DisentangledSelfAttention {
                 let layer_size = pos_query_layer.dim(D::Minus1)?;
                 Tensor::new(&[(layer_size * scale_factor) as f32], &self.device)?.sqrt()?
             };
-            t!("scale", scale);
+            // t!("scale", scale);
 
             let r_pos = {
                 if key_layer.dim(D::Minus2)? != query_layer.dim(D::Minus2)? {
@@ -977,7 +964,7 @@ impl DebertaV2DisentangledSelfAttention {
                 }
             };
 
-            t!("r_pos", r_pos);
+            // t!("r_pos", r_pos);
 
             let p2c_pos = {
                 let att_span_t = Tensor::new(&[att_span as f32], &self.device)?;
@@ -987,11 +974,11 @@ impl DebertaV2DisentangledSelfAttention {
                     .neg()?
                     .broadcast_add(&att_span_t)?;
 
-                t!("to_clamp", to_clamp);
+                // t!("to_clamp", to_clamp);
                 to_clamp.clamp(0f32, (att_span * 2 - 1) as f32)?
             };
 
-            t!("p2c_pos", p2c_pos);
+            // t!("p2c_pos", p2c_pos);
 
             let p2c_att = {
                 let transposed = pos_query_layer.transpose(D::Minus1, D::Minus2)?;
@@ -1005,17 +992,17 @@ impl DebertaV2DisentangledSelfAttention {
                     ])?
                     .contiguous()?
                     .to_dtype(DType::U32)?;
-                t!("gather_idx", gather_idx);
+                // t!("gather_idx", gather_idx);
                 bmm.gather(&gather_idx, D::Minus1)?
                     .transpose(D::Minus1, D::Minus2)?
             };
 
-            t!("p2c_att", p2c_att);
+            // t!("p2c_att", p2c_att);
 
             score =
                 score.broadcast_add(&p2c_att.broadcast_div(&scale.to_dtype(p2c_att.dtype())?)?)?;
 
-            t!("score", score);
+            // t!("score", score);
         }
         // println!(
         //     "rel_embeddings: {:?}\n{}",
@@ -1033,7 +1020,7 @@ pub struct DebertaV2Attention {
     // dsa: DebertaV2DisentangledSelfAttention<'a>,
     dsa: DebertaV2DisentangledSelfAttention,
     output: DebertaV2SelfOutput,
-    config: Config,
+    // config: Config,
 }
 
 // impl<'a> DebertaV2Attention<'a> {
@@ -1045,7 +1032,7 @@ impl DebertaV2Attention {
         Ok(Self {
             dsa,
             output,
-            config: config.clone(),
+            // config: config.clone(),
         })
     }
 
@@ -1065,7 +1052,7 @@ impl DebertaV2Attention {
         // rel_embeddings: Option<&Tensor>,
         let self_output = self.dsa.forward(
             hidden_states,
-            &attention_mask,
+            attention_mask,
             query_states,
             relative_pos,
             rel_embeddings,
@@ -1076,7 +1063,7 @@ impl DebertaV2Attention {
             query_states = Some(hidden_states)
         }
 
-        Ok(self.output.forward(&self_output, &query_states.unwrap())?)
+        self.output.forward(&self_output, query_states.unwrap())
     }
 }
 
@@ -1104,19 +1091,19 @@ impl DebertaV2SelfOutput {
 
     pub fn forward(&self, hidden_states: &Tensor, input_tensor: &Tensor) -> candle::Result<Tensor> {
         let mut hidden_states = self.dense.forward(hidden_states)?;
-        t!("hidden_states", hidden_states);
+        // t!("hidden_states", hidden_states);
         hidden_states =
             self.dropout
                 .forward(Some(&hidden_states))?
                 .ok_or(candle::error::Error::Msg(
                     "DebertaV2SelfOuput dropout did not return a Tensor".to_string(),
                 ))?;
-        t!("hidden_states", hidden_states);
+        // t!("hidden_states", hidden_states);
         hidden_states = {
             let to_norm = hidden_states.broadcast_add(input_tensor)?;
             self.layer_norm.forward(&to_norm)?
         };
-        t!("hidden_states", hidden_states);
+        // t!("hidden_states", hidden_states);
         Ok(hidden_states)
     }
 }
@@ -1142,10 +1129,10 @@ impl DebertaV2Intermediate {
 
     pub fn forward(&self, hidden_states: &Tensor) -> candle::Result<Tensor> {
         // let mut hidden_states = hidden_states;
-        let mut hidden_states = self.dense.forward(&hidden_states)?;
-        t!("hidden_states", hidden_states);
+        let mut hidden_states = self.dense.forward(hidden_states)?;
+        // t!("hidden_states", hidden_states);
         hidden_states = self.intermediate_act.forward(&hidden_states)?;
-        t!("hidden_states", hidden_states);
+        // t!("hidden_states", hidden_states);
 
         Ok(hidden_states)
     }
@@ -1178,20 +1165,20 @@ impl DebertaV2Output {
     }
 
     pub fn forward(&self, hidden_states: &Tensor, input_tensor: &Tensor) -> candle::Result<Tensor> {
-        let mut hidden_states = self.dense.forward(&hidden_states)?;
-        t!("hidden_states", hidden_states);
+        let mut hidden_states = self.dense.forward(hidden_states)?;
+        // t!("hidden_states", hidden_states);
         hidden_states =
             self.dropout
                 .forward(Some(&hidden_states))?
                 .ok_or(candle::error::Error::Msg(
                     "DebertaV2Ouptut did not receive a Tensor after dropout".to_string(),
                 ))?;
-        t!("hidden_states", hidden_states);
+        // t!("hidden_states", hidden_states);
         hidden_states = {
             let to_norm = hidden_states.broadcast_add(input_tensor)?;
             self.layer_norm.forward(&to_norm)?
         };
-        t!("hidden_states", hidden_states);
+        // t!("hidden_states", hidden_states);
         Ok(hidden_states)
     }
 }
@@ -1229,7 +1216,7 @@ impl DebertaV2Layer {
             relative_pos,
             rel_embeddings,
         )?;
-        t!("attention_output", attention_output);
+        // t!("attention_output", attention_output);
 
         let intermediate_output = self.intermediate.forward(&attention_output)?;
 
@@ -1239,18 +1226,15 @@ impl DebertaV2Layer {
 
         Ok(layer_output)
     }
-
-    // pub fn forward(&self) -> candle::Result<Tensor> {
-    //     todo!()
-    // }
 }
 
+// TODO: In order to fully test ConvLayer a model needs to be found has a configuration where `conv_kernel_size` exists and is > 0
 pub struct ConvLayer {
-    conv_act: String,
-    conv: Conv1d,
-    layer_norm: LayerNorm,
-    dropout: StableDropout,
-    config: Config,
+    _conv_act: String,
+    _conv: Conv1d,
+    _layer_norm: LayerNorm,
+    _dropout: StableDropout,
+    _config: Config,
 }
 
 impl ConvLayer {
@@ -1260,10 +1244,11 @@ impl ConvLayer {
         let groups = config.conv_groups.unwrap_or(1);
         let conv_act: String = config.conv_act.clone().unwrap_or("tanh".to_string());
 
-        // TODO: Check the defaults against the Python version.
-        let mut conv_conf = Conv1dConfig::default();
-        conv_conf.padding = (kernel_size - 1) / 2;
-        conv_conf.groups = groups;
+        let conv_conf = Conv1dConfig {
+            padding: (kernel_size - 1) / 2,
+            groups,
+            ..Default::default()
+        };
 
         let conv = conv1d(
             config.hidden_size,
@@ -1282,19 +1267,19 @@ impl ConvLayer {
         let dropout = StableDropout::new(config.hidden_dropout_prob);
 
         Ok(Self {
-            conv_act,
-            conv,
-            layer_norm,
-            dropout,
-            config,
+            _conv_act: conv_act,
+            _conv: conv,
+            _layer_norm: layer_norm,
+            _dropout: dropout,
+            _config: config,
         })
     }
 
     pub fn forward(
         &self,
-        hidden_states: &Tensor,
-        residual_states: &Tensor,
-        input_mask: &Tensor,
+        _hidden_states: &Tensor,
+        _residual_states: &Tensor,
+        _input_mask: &Tensor,
     ) -> candle::Result<Tensor> {
         todo!("Need a model that contains a conv layer to test against.")
     }
@@ -1309,7 +1294,7 @@ pub struct DebertaV2Encoder {
     norm_rel_ebd: String,
     layer_norm: Option<LayerNorm>,
     conv: Option<ConvLayer>,
-    gradient_checkpointing: bool,
+    // _gradient_checkpointing: bool,
     device: Device,
 }
 
@@ -1322,10 +1307,11 @@ impl DebertaV2Encoder {
         let relative_attention = config.relative_attention;
         let mut max_relative_positions = config.max_relative_positions;
 
-        let position_buckets = match config.position_buckets {
-            Some(ps) => ps,
-            None => -1,
-        };
+        // let position_buckets = match config.position_buckets {
+        //     Some(ps) => ps,
+        //     None => -1,
+        // };
+        let position_buckets = config.position_buckets.unwrap_or(-1);
 
         let mut rel_embeddings: Option<Embedding> = None;
 
@@ -1377,7 +1363,7 @@ impl DebertaV2Encoder {
             norm_rel_ebd,
             layer_norm,
             conv,
-            gradient_checkpointing: false,
+            // gradient_checkpointing: false,
             device: vb.device().clone(),
         })
     }
@@ -1416,18 +1402,18 @@ impl DebertaV2Encoder {
                 .gt(0.)?
         };
 
-        t!("input_mask @ DebertaV2Encoder forward", input_mask);
+        // t!("input_mask @ DebertaV2Encoder forward", input_mask);
 
         let attention_mask = self.get_attention_mask(attention_mask.clone())?;
 
-        t!("attention_mask @ DebertaV2Encoder", attention_mask);
+        // t!("attention_mask @ DebertaV2Encoder", attention_mask);
 
         let relative_pos = self.get_rel_pos(hidden_states, query_states, relative_pos)?;
 
-        t!(
-            "relative_pos @ DebertaV2Encoder",
-            relative_pos.as_ref().unwrap().to_string()
-        );
+        // t!(
+        //     "relative_pos @ DebertaV2Encoder",
+        //     relative_pos.as_ref().unwrap().to_string()
+        // );
 
         // let next_kv = hidden_states;
         let mut next_kv: Tensor = hidden_states.clone();
@@ -1437,12 +1423,12 @@ impl DebertaV2Encoder {
         // let mut query_states = query_states;
         let mut query_states: Option<Tensor> = query_states.cloned();
 
-        t!("next_kv", next_kv.to_string());
-        t!(
-            "rel_embeddings",
-            rel_embeddings.as_ref().unwrap().to_string()
-        );
-        t!("output_states", output_states.to_string());
+        // t!("next_kv", next_kv.to_string());
+        // t!(
+        // "rel_embeddings",
+        // rel_embeddings.as_ref().unwrap().to_string()
+        // );
+        // t!("output_states", output_states.to_string());
         // t!("query_states", query_states.as_ref().unwrap().to_string());
 
         for (i, layer_module) in self.layer.iter().enumerate() {
@@ -1461,7 +1447,7 @@ impl DebertaV2Encoder {
                 rel_embeddings.as_ref(),
             )?;
 
-            t!("output_states", output_states);
+            // t!("output_states", output_states);
 
             if i == 0 && self.conv.is_some() {
                 output_states = self.conv.as_ref().unwrap().forward(
@@ -1477,10 +1463,10 @@ impl DebertaV2Encoder {
                 next_kv = output_states.clone();
             }
 
-            t!("next_kv", next_kv);
+            // t!("next_kv", next_kv);
         }
 
-        t!("output_states final", output_states);
+        // t!("output_states final", output_states);
         Ok(output_states)
     }
 
@@ -1560,7 +1546,7 @@ pub struct DebertaV2Model {
     embeddings: DebertaV2Embeddings,
     encoder: DebertaV2Encoder,
     z_steps: usize,
-    config: Config,
+    // config: Config,
     pub device: Device,
     // vb: VarBuilder<'vb>,
 }
@@ -1578,7 +1564,7 @@ impl DebertaV2Model {
             embeddings,
             encoder,
             z_steps,
-            config: config.clone(),
+            // config: config.clone(),
             device: vb.device().clone(),
         })
     }
@@ -1597,7 +1583,7 @@ impl DebertaV2Model {
             None => Tensor::ones(input_ids_shape, DType::I64, &self.device)?,
         };
 
-        t!("attention_mask @ DebertaV2Model forward", attention_mask);
+        // t!("attention_mask @ DebertaV2Model forward", attention_mask);
 
         let token_type_ids = match token_type_ids {
             Some(ids) => ids,
@@ -1605,7 +1591,7 @@ impl DebertaV2Model {
             None => Tensor::zeros(input_ids_shape, DType::U32, &self.device)?,
         };
 
-        t!("token_type_ids @ DebertaV2Model forward", token_type_ids);
+        // t!("token_type_ids @ DebertaV2Model forward", token_type_ids);
 
         let embedding_output = self.embeddings.forward(
             Some(input_ids),
@@ -1624,7 +1610,7 @@ impl DebertaV2Model {
             self.encoder
                 .forward(&embedding_output, &attention_mask, None, None)?;
 
-        t!("encoder_output @ DebertaV2Model", encoder_output);
+        // t!("encoder_output @ DebertaV2Model", encoder_output);
 
         if self.z_steps > 1 {
             todo!("Copmlete DebertaV2Model forward() when z_steps > 1")
@@ -1655,7 +1641,7 @@ pub struct NERItem {
 
 pub struct DebertaV2NERModel {
     pub device: Device,
-    id2label: Id2Label,
+    // id2label: Id2Label,
     deberta: DebertaV2Model,
     dropout: candle_nn::Dropout,
     classifier: candle_nn::Linear,
@@ -1667,23 +1653,25 @@ impl DebertaV2NERModel {
         config: &Config,
         id2label: Option<Id2Label>,
     ) -> candle::Result<Self> {
-        let id2label: Id2Label = match &config.id2label {
-            Some(i2l) => i2l.clone(),
-            None => id2label.ok_or(candle::error::Error::Msg("Id2Label is either not present in the model configuration or not passed into DebertaV2NERModel::load as a parameter".to_string()))?
+        let id2label_len = match (&config.id2label, id2label) {
+            (None, None) => return Err(candle::error::Error::Msg("Id2Label is either not present in the model configuration or not passed into DebertaV2NERModel::load as a parameter".to_string())),
+            (None, Some(id2label_p)) => id2label_p.len(),
+            (Some(id2label_c), None) => id2label_c.len(),
+            (Some(_), Some(_)) => return Err(candle::error::Error::Msg("Id2Label is both present in the model configuration and provided as a parameter.".to_string())),
         };
 
-        let deberta = DebertaV2Model::load(vb.clone(), &config)?;
+        let deberta = DebertaV2Model::load(vb.clone(), config)?;
         let dropout = candle_nn::Dropout::new(config.hidden_dropout_prob as f32);
         let classifier: candle_nn::Linear = candle_nn::linear_no_bias(
             config.hidden_size,
-            id2label.len(),
+            id2label_len,
             vb.root().pp("classifier"),
         )?;
 
         Ok(Self {
             device: vb.device().clone(),
             deberta,
-            id2label,
+            // id2label,
             dropout,
             classifier,
         })
@@ -1699,7 +1687,7 @@ impl DebertaV2NERModel {
             .deberta
             .forward(input_ids, token_type_ids, attention_mask)?;
         let output = self.dropout.forward(&output, false)?;
-        Ok(self.classifier.forward(&output)?)
+        self.classifier.forward(&output)
 
         // for (idx, is_special) in self.special_tokens_mask.iter().enumerate() {
         //     if *is_special {
@@ -1737,118 +1725,6 @@ impl DebertaV2NERModel {
         //         index: idx,
         //     })
         // }
-    }
-
-    pub fn entities(
-        &self,
-        // token_pieces: &Vec<SentencePiece>,
-        input_ids: &Tensor,
-        token_type_ids: Option<Tensor>,
-        attention_mask: Option<Tensor>,
-    ) -> candle::Result<Vec<Vec<NERItem>>> {
-        // pub fn entities(&self, encodings: &Vec<Encoding>) -> candle::Result<Vec<Vec<NERItem>>> {
-        // let token_ids: Vec<u32> = token_pieces.iter().map(|piece| piece.id).collect();
-
-        // let input_ids: Tensor = Tensor::new(&token_ids[..], &self.device)?.unsqueeze(0)?;
-
-        // println!("input_ids: {}", input_ids.to_string());
-        // println!("token_type_ids: {}", token_type_ids.unwrap().to_string());
-        // println!("attention_mask: {}", attention_mask.unwrap().to_string());
-        let logits = self.forward(input_ids, token_type_ids, attention_mask)?;
-
-        // t!("logits", logits);
-        // todo!("ajsdksja");
-
-        let maxes = logits.max_keepdim(D::Minus1)?;
-        let shifted_exp = {
-            let logits_minus_maxes = logits.broadcast_sub(&maxes)?;
-            logits_minus_maxes.exp()?
-        };
-        let mut scores = {
-            let sum = shifted_exp.sum_keepdim(D::Minus1)?;
-            shifted_exp.broadcast_div(&sum)?
-        };
-
-        let batch_scores = scores.argmax_keepdim(2)?.to_vec3::<u32>()?;
-        // let batch_scores = scores.argmax_keepdim(2)?.squeeze(1)?.to_vec2::<u32>()?;
-
-        let batch_results: Vec<Vec<NERItem>> = Vec::default();
-
-        for batch_score in batch_scores {
-            let values: Vec<NERItem> = Vec::default();
-
-            for score in batch_score {}
-            // each batch_score is a batch, e.g. two sentences = two batches
-            // batch_score[I] contains 1..input size for all batches
-            // batch_score[I][i]
-            println!("heh");
-        }
-
-        // let f = scores.argmax_keepdim(2)?;
-        // t!("maxes?", f);
-
-        // let g = f.to_vec3::<u32>()?;
-        // t!("scores 1", scores);
-        // scores = scores.squeeze(0)?;
-        // t!("scores 2", scores);
-        // scores = scores.squeeze(0)?;
-        // t!("scores 3", scores);
-        // let batch_scores = scores.to_vec3::<f32>()?;
-        // let scores = scores
-        //     .squeeze(0)?
-        //     .squeeze(0)?
-        //     .squeeze(0)?
-        //     .to_vec1::<f32>()?;
-        // let mut values: Vec<NERItem> = vec![];
-
-        // for batch_score in batch_scores {
-        // batch_score dimension 1 =
-        // let highest_score_idx = batch_score
-        //     .iter()
-        //     .enumerate()
-        //     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        //     .map(|(index, _)| index)
-        //     .unwrap();
-        // scores.max(dim)
-
-        // println!("highest score idx: {highest_score_idx}");
-        // }
-
-        todo!()
-        /*
-        for (idx, piece) in token_pieces.iter().enumerate() {
-            if piece.is_special {
-                continue;
-            }
-
-            let highest_score_idx = scores[idx]
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(index, _)| index)
-                .unwrap();
-
-            let label = self.id2label.get(&highest_score_idx).unwrap().clone();
-
-            // let (span, word) = match &encoded_tokens[idx] {
-            //     SentencePieceToken::Ignore => ((0, 0), String::from("")),
-            //     SentencePieceToken::Piece(piece) => {
-            //         ((piece.span.0, piece.span.1), piece.piece.to_owned())
-            //     }
-            // };
-
-            values.push(NERItem {
-                entity: label,
-                word: piece.piece.clone(),
-                score: scores[idx][highest_score_idx],
-                start: piece.span.0,
-                end: piece.span.1,
-                index: idx,
-            })
-        }
-
-        Ok(vec![values])
-        */
     }
 }
 
@@ -1989,7 +1865,8 @@ pub(crate) fn make_log_bucket_position(
         // println!("first_log: {:?}\n{}", first_log, first_log.to_string());
 
         let second_log = Tensor::from_slice(
-            &[((max_position as f32 - 1.0) / mid as f32) as f32],
+            &[((max_position as f32 - 1.0) / mid as f32)],
+            // &[((max_position as f32 - 1.0) / mid as f32) as f32],
             (1,),
             device,
         )?

@@ -3,7 +3,7 @@ extern crate intel_mkl_src;
 
 #[cfg(feature = "accelerate")]
 extern crate accelerate_src;
-use std::collections::HashMap;
+
 use std::fmt::Display;
 use std::path::PathBuf;
 
@@ -11,16 +11,12 @@ use anyhow::ensure;
 use anyhow::{Error as E, Result};
 use candle::{Device, Tensor, D};
 use candle_nn::VarBuilder;
-use candle_transformers::models::based::Model;
-use candle_transformers::models::debertav2::{
-    Config as DebertaV2Config, DebertaV2NERModel, NERItem, SentencePiece,
-};
+use candle_transformers::models::debertav2::NERItem;
+use candle_transformers::models::debertav2::{Config as DebertaV2Config, DebertaV2NERModel};
 use candle_transformers::models::debertav2::{DebertaV2Model, Id2Label};
-use candle_transformers::models::stable_diffusion::attention;
 use clap::{Parser, ValueEnum};
 use hf_hub::{api::sync::Api, Repo, RepoType};
-use sentencepiece::SentencePieceProcessor;
-use tokenizers::{Encoding, PaddingParams, Tokenizer, TokenizerBuilder};
+use tokenizers::{Encoding, PaddingParams, Tokenizer};
 
 enum DebertaV2ModelType {
     Base(DebertaV2Model),
@@ -187,22 +183,6 @@ fn get_device(model_type: &DebertaV2ModelType) -> &Device {
     }
 }
 
-// fn special_tokens(spp: &SentencePieceProcessor) -> HashMap<u32, bool> {
-//     let mut special_tokens = HashMap::<u32, bool>::new();
-//     if let Some(id) = spp.bos_id() {
-//         special_tokens.insert(id, true);
-//     }
-//     if let Some(id) = spp.eos_id() {
-//         special_tokens.insert(id, true);
-//     }
-//     if let Some(id) = spp.pad_id() {
-//         special_tokens.insert(id, true);
-//     }
-//     special_tokens.insert(spp.unk_id(), true);
-
-//     special_tokens
-// }
-
 enum InputEncoding {
     Single(Encoding),
     Batch(Vec<Encoding>),
@@ -229,52 +209,8 @@ fn main() -> Result<()> {
         None
     };
 
-    // let start = std::time::Instant::now();
-
     let (model_type, model_config, tokenizer) = args.build_model_and_tokenizer(None)?;
     let device = get_device(&model_type);
-
-    /*
-    let mut token_pieces: Vec<candle_transformers::models::debertav2::SentencePiece> = tokenizer
-        .encode(args.sentences.first().unwrap())?
-        .iter()
-        .map(|piece| SentencePiece {
-            piece: piece.piece.clone(),
-            id: piece.id,
-            span: piece.span,
-            is_special: false,
-        })
-        .collect();
-
-    token_pieces.insert(
-        0,
-        SentencePiece {
-            piece: "".to_string(),
-            id: tokenizer.bos_id().unwrap(),
-            span: (0, 0),
-            is_special: true,
-        },
-    );
-
-    token_pieces.push(SentencePiece {
-        piece: String::new(),
-        id: tokenizer.eos_id().unwrap(),
-        span: (0, 0),
-        is_special: true,
-    });
-
-    // println!("Token pieces: {:?}", token_pieces);
-    */
-    // TEMP TEMP TEMP
-    // use tokenizers::tokenizer::{Result, Tokenizer};
-
-    // let mut tokenizer = Tokenizer::from_pretrained(args.model_id, None).expect("ohno");
-    // tokenizer.with_padding(Some(PaddingParams::default()));
-    // let encoding = tokenizer
-    //     .encode(args.sentences.first().unwrap().as_str(), false)
-    //     .expect("ohno");
-
-    // println!("{:?}", args.sentences);
 
     // Single sentence passed in means we don't need batching.
     // Multiple sentences passed in means we have can/should do batching.
@@ -337,13 +273,16 @@ fn main() -> Result<()> {
                         shifted_exp.broadcast_div(&sum)?.squeeze(0)?
                     };
 
-                    // Differences start here?
                     let predicted_label_ids = scores.argmax(1)?.to_vec1::<u32>()?;
                     let max_scores = scores.max(1)?.to_vec1::<f32>()?;
                     let id2label = model_config.id2label.as_ref().unwrap();
                     let mut result: Vec<NERItem> = Vec::default();
 
                     for (idx, predicted_label_id) in predicted_label_ids.iter().enumerate() {
+                        if tokenizer_encoding.get_special_tokens_mask()[idx] == 1 {
+                            continue;
+                        }
+
                         let label = id2label.get(&predicted_label_id).unwrap();
 
                         if label == "O" {
@@ -391,21 +330,7 @@ fn main() -> Result<()> {
                             if label == "O" {
                                 continue;
                             }
-                            // println!(
-                            //     "entity {}",
-                            //     model_config.id2label.as_ref().unwrap()[&input_label[0]]
-                            // );
-                            // println!("word {}", tokenizer_encodings[batch_idx].get_tokens()[idx]);
-                            // println!(
-                            //     "span start {}",
-                            //     tokenizer_encodings[batch_idx].get_offsets()[idx].0
-                            // );
-                            // println!(
-                            //     "span end {}",
-                            //     tokenizer_encodings[batch_idx].get_offsets()[idx].1
-                            // );
-                            // println!("index {}", idx);
-                            // todo!()
+
                             batch_result.push(NERItem {
                                 entity: label,
                                 word: tokenizer_encodings[batch_idx].get_tokens()[idx].clone(),
@@ -423,132 +348,5 @@ fn main() -> Result<()> {
             }
         }
     }
-
-    // assert!(
-    //     token_pieces.len() - 2 <= model_config.max_position_embeddings,
-    //     "Number of tokens produced for sentence ```{}``` ({} tokens) is larger than the model's configuration for max embeddings ({} tokens).",
-    //     args.sentences.first().unwrap(),
-    //     token_pieces.len(),
-    //     model_config.max_position_embeddings
-    // );
-
-    // let mut token_ids: Vec<u32> = vec![tokenizer.bos_id().unwrap()];
-    // token_pieces
-    //     .iter()
-    //     .for_each(|piece| token_ids.push(piece.id));
-    // token_ids.push(tokenizer.eos_id().unwrap());
-
-    // let input: Tensor = Tensor::new(&token_ids[..], &device)?.unsqueeze(0)?;
-
-    // match model_type {
-    //     DebertaV2ModelType::Base(_base_model) => todo!(),
-    //     DebertaV2ModelType::NER(ner_model) => {
-    //         let entities = ner_model.entities(&token_pieces, None, None)?;
-    //         println!("{:?}", entities);
-    //     }
-    // }
-
-    // let device = match model {
-    //     DebertaV2ModelType::Base(base_model) => base_model.device,
-    //     DebertaV2ModelType::NER(ner_model) => ner_model.device,
-    // };
-
-    // if let Some(prompt) = args.prompt {
-    //     let tokenizer = tokenizer
-    //         .with_padding(None)
-    //         .with_truncation(None)
-    //         .map_err(E::msg)?;
-    //     let tokens = tokenizer
-    //         .encode(prompt, true)
-    //         .map_err(E::msg)?
-    //         .get_ids()
-    //         .to_vec();
-    //     let token_ids = Tensor::new(&tokens[..], device)?.unsqueeze(0)?;
-    //     let token_type_ids = token_ids.zeros_like()?;
-    //     println!("Loaded and encoded {:?}", start.elapsed());
-    //     for idx in 0..args.n {
-    //         let start = std::time::Instant::now();
-    //         let ys = model.forward(&token_ids, &token_type_ids, None)?;
-    //         if idx == 0 {
-    //             println!("{ys}");
-    //         }
-    //         println!("Took {:?}", start.elapsed());
-    //     }
-    // } else {
-    //     let sentences = [
-    //         "The cat sits outside",
-    //         "A man is playing guitar",
-    //         "I love pasta",
-    //         "The new movie is awesome",
-    //         "The cat plays in the garden",
-    //         "A woman watches TV",
-    //         "The new movie is so great",
-    //         "Do you like pizza?",
-    //     ];
-    //     let n_sentences = sentences.len();
-    //     if let Some(pp) = tokenizer.get_padding_mut() {
-    //         pp.strategy = tokenizers::PaddingStrategy::BatchLongest
-    //     } else {
-    //         let pp = PaddingParams {
-    //             strategy: tokenizers::PaddingStrategy::BatchLongest,
-    //             ..Default::default()
-    //         };
-    //         tokenizer.with_padding(Some(pp));
-    //     }
-    //     let tokens = tokenizer
-    //         .encode_batch(sentences.to_vec(), true)
-    //         .map_err(E::msg)?;
-    //     let token_ids = tokens
-    //         .iter()
-    //         .map(|tokens| {
-    //             let tokens = tokens.get_ids().to_vec();
-    //             Ok(Tensor::new(tokens.as_slice(), device)?)
-    //         })
-    //         .collect::<Result<Vec<_>>>()?;
-    //     let attention_mask = tokens
-    //         .iter()
-    //         .map(|tokens| {
-    //             let tokens = tokens.get_attention_mask().to_vec();
-    //             Ok(Tensor::new(tokens.as_slice(), device)?)
-    //         })
-    //         .collect::<Result<Vec<_>>>()?;
-
-    //     let token_ids = Tensor::stack(&token_ids, 0)?;
-    //     let attention_mask = Tensor::stack(&attention_mask, 0)?;
-    //     let token_type_ids = token_ids.zeros_like()?;
-    //     println!("running inference on batch {:?}", token_ids.shape());
-    //     let embeddings = model.forward(&token_ids, &token_type_ids, Some(&attention_mask))?;
-    //     println!("generated embeddings {:?}", embeddings.shape());
-    //     // Apply some avg-pooling by taking the mean embedding value for all tokens (including padding)
-    //     let (_n_sentence, n_tokens, _hidden_size) = embeddings.dims3()?;
-    //     let embeddings = (embeddings.sum(1)? / (n_tokens as f64))?;
-    //     let embeddings = if args.normalize_embeddings {
-    //         normalize_l2(&embeddings)?
-    //     } else {
-    //         embeddings
-    //     };
-    //     println!("pooled embeddings {:?}", embeddings.shape());
-
-    //     let mut similarities = vec![];
-    //     for i in 0..n_sentences {
-    //         let e_i = embeddings.get(i)?;
-    //         for j in (i + 1)..n_sentences {
-    //             let e_j = embeddings.get(j)?;
-    //             let sum_ij = (&e_i * &e_j)?.sum_all()?.to_scalar::<f32>()?;
-    //             let sum_i2 = (&e_i * &e_i)?.sum_all()?.to_scalar::<f32>()?;
-    //             let sum_j2 = (&e_j * &e_j)?.sum_all()?.to_scalar::<f32>()?;
-    //             let cosine_similarity = sum_ij / (sum_i2 * sum_j2).sqrt();
-    //             similarities.push((cosine_similarity, i, j))
-    //         }
-    //     }
-    //     similarities.sort_by(|u, v| v.0.total_cmp(&u.0));
-    //     for &(score, i, j) in similarities[..5].iter() {
-    //         println!("score: {score:.2} '{}' '{}'", sentences[i], sentences[j])
-    //     }
-    // }
     Ok(())
-}
-
-pub fn normalize_l2(v: &Tensor) -> Result<Tensor> {
-    Ok(v.broadcast_div(&v.sqr()?.sum_keepdim(1)?.sqrt()?)?)
 }
