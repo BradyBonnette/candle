@@ -11,15 +11,14 @@ use anyhow::ensure;
 use anyhow::{Error as E, Result};
 use candle::{Device, Tensor, D};
 use candle_nn::VarBuilder;
+use candle_transformers::models::debertav2::Id2Label;
 use candle_transformers::models::debertav2::NERItem;
 use candle_transformers::models::debertav2::{Config as DebertaV2Config, DebertaV2NERModel};
-use candle_transformers::models::debertav2::{DebertaV2Model, Id2Label};
-use clap::{Parser, ValueEnum};
+use clap::{ArgGroup, Parser, ValueEnum};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use tokenizers::{Encoding, PaddingParams, Tokenizer};
 
 enum DebertaV2ModelType {
-    Base(DebertaV2Model),
     NER(DebertaV2NERModel),
 }
 
@@ -37,8 +36,13 @@ impl Display for ArgsTask {
     }
 }
 
+// #[derive(Parser, Debug)]
+// #[command(author, version, about, long_about = None)]
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
+#[command(group(ArgGroup::new("model")
+    .required(true)
+    .args(&["model_id", "model_path"])))]
 struct Args {
     /// Run on CPU rather than on GPU.
     #[arg(long)]
@@ -48,12 +52,12 @@ struct Args {
     #[arg(long)]
     tracing: bool,
 
-    /// The model to use
-    #[arg(long, default_value = "microsoft/deberta-v3-large")]
-    model_id: String,
+    /// The model id to use from HuggingFace
+    #[arg(long, requires_if("model_id", "revision"))]
+    model_id: Option<String>,
 
-    /// Revision of the model to use
-    #[arg(long, default_value = "refs/pr/4")]
+    /// Revision of the model to use (default: "main")
+    #[arg(long, default_value = "main")]
     revision: String,
 
     /// Specify a sentence to inference. Specify multiple times to inference multiple sentences.
@@ -64,13 +68,9 @@ struct Args {
     #[arg(long)]
     use_pth: bool,
 
-    /// The number of times to run the prompt.
-    #[arg(long, default_value = "1")]
-    n: usize,
-
-    /// L2 normalization for embeddings.
-    #[arg(long, default_value = "true")]
-    normalize_embeddings: bool,
+    /// Perform a very basic benchmark on inferencing, using N number of iterations
+    #[arg(long)]
+    benchmark_iters: Option<usize>,
 
     // /// Use tanh based approximation for Gelu instead of erf implementation.
     // #[arg(long, default_value = "false")]
@@ -79,13 +79,10 @@ struct Args {
     #[arg(long, default_value_t = ArgsTask::NER)]
     task: ArgsTask,
 
-    /// Use model from specific directory instead of HuggingFace local cache.
+    /// Use model from a specific directory instead of HuggingFace local cache.
     /// Using this ignores model_id and revision args.
     #[arg(long)]
     model_path: Option<PathBuf>,
-    // /// Specify SentencePiece model filename
-    // #[arg(long, default_value = "spm.model")]
-    // spm_filename: String,
 }
 
 impl Args {
@@ -118,7 +115,7 @@ impl Args {
                 }
                 None => {
                     let repo = Repo::with_revision(
-                        self.model_id.clone(),
+                        self.model_id.as_ref().unwrap().clone(),
                         RepoType::Model,
                         self.revision.clone(),
                     );
@@ -178,7 +175,6 @@ impl Args {
 
 fn get_device(model_type: &DebertaV2ModelType) -> &Device {
     match model_type {
-        DebertaV2ModelType::Base(base_model) => &base_model.device,
         DebertaV2ModelType::NER(ner_model) => &ner_model.device,
     }
 }
@@ -201,6 +197,11 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    if args.model_id.is_some() && args.model_path.is_some() {
+        eprintln!("Error: Cannot specify both --model_id and --model_path.");
+        std::process::exit(1);
+    }
+
     let _guard = if args.tracing {
         let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
         tracing_subscriber::registry().with(chrome_layer).init();
@@ -209,11 +210,18 @@ fn main() -> Result<()> {
         None
     };
 
+    let model_load_time = std::time::Instant::now();
     let (model_type, model_config, tokenizer) = args.build_model_and_tokenizer(None)?;
+    println!(
+        "Loaded model and tokenizers in {:?}",
+        model_load_time.elapsed()
+    );
+
     let device = get_device(&model_type);
 
     // Single sentence passed in means we don't need batching.
     // Multiple sentences passed in means we have can/should do batching.
+    let tokenize_time = std::time::Instant::now();
     let model_input: ModelInput = match args.sentences.len() {
         1 => {
             let encoding = tokenizer
@@ -252,14 +260,35 @@ fn main() -> Result<()> {
         }
     };
 
+    println!(
+        "Tokenized and loaded inputs in {:?}",
+        tokenize_time.elapsed()
+    );
+
     match model_type {
-        DebertaV2ModelType::Base(_base_model) => todo!(),
         DebertaV2ModelType::NER(ner_model) => {
+            let inference_time = std::time::Instant::now();
+
+            if let Some(num_iters) = args.benchmark_iters {
+                create_benchmark(num_iters, model_input)(
+                    |input_ids, token_type_ids, attention_mask| {
+                        ner_model
+                            .forward(input_ids, Some(token_type_ids), Some(attention_mask))
+                            .expect("ohno");
+                        Ok(())
+                    },
+                );
+
+                std::process::exit(0);
+            }
+
             let logits = ner_model.forward(
                 &model_input.input_ids,
                 Some(model_input.token_type_ids),
                 Some(model_input.attention_mask),
             )?;
+
+            println!("Inferenced inputs in {:?}", inference_time.elapsed());
 
             match model_input.encoding {
                 InputEncoding::Single(tokenizer_encoding) => {
@@ -298,7 +327,7 @@ fn main() -> Result<()> {
                             index: idx,
                         });
                     }
-                    println!("{:?}", result);
+                    println!("\n{:?}", result);
                 }
                 InputEncoding::Batch(tokenizer_encodings) => {
                     let maxes = logits.max_keepdim(D::Minus1)?;
@@ -343,10 +372,36 @@ fn main() -> Result<()> {
                         batch_results.push(batch_result);
                     }
 
-                    println!("{:?}", batch_results);
+                    println!("\n{:?}", batch_results);
                 }
             }
         }
     }
     Ok(())
+}
+
+fn create_benchmark<F>(num_iters: usize, model_input: ModelInput) -> impl Fn(F) -> ()
+where
+    F: Fn(&Tensor, Tensor, Tensor) -> Result<(), candle::Error>,
+{
+    move |code: F| -> () {
+        println!("Running {num_iters} iterations...");
+        let mut durations = Vec::with_capacity(num_iters);
+        for _ in 0..num_iters {
+            let token_type_ids = model_input.token_type_ids.clone();
+            let attention_mask = model_input.attention_mask.clone();
+            let start = std::time::Instant::now();
+            code(&model_input.input_ids, token_type_ids, attention_mask).expect("ohno");
+            let duration = start.elapsed();
+            durations.push(duration.as_nanos());
+        }
+
+        let min_time = *durations.iter().min().unwrap();
+        let max_time = *durations.iter().max().unwrap();
+        let avg_time = durations.iter().sum::<u128>() as f64 / num_iters as f64;
+
+        println!("Min time: {:.3} ms", min_time as f64 / 1_000_000.0);
+        println!("Avg time: {:.3} ms", avg_time / 1_000_000.0);
+        println!("Max time: {:.3} ms", max_time as f64 / 1_000_000.0);
+    }
 }
