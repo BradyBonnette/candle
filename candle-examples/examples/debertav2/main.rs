@@ -267,8 +267,6 @@ fn main() -> Result<()> {
 
     match model_type {
         DebertaV2ModelType::NER(ner_model) => {
-            let inference_time = std::time::Instant::now();
-
             if let Some(num_iters) = args.benchmark_iters {
                 create_benchmark(num_iters, model_input)(
                     |input_ids, token_type_ids, attention_mask| {
@@ -282,12 +280,12 @@ fn main() -> Result<()> {
                 std::process::exit(0);
             }
 
+            let inference_time = std::time::Instant::now();
             let logits = ner_model.forward(
                 &model_input.input_ids,
                 Some(model_input.token_type_ids),
                 Some(model_input.attention_mask),
             )?;
-
             println!("Inferenced inputs in {:?}", inference_time.elapsed());
 
             match model_input.encoding {
