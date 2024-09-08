@@ -179,7 +179,6 @@ impl DebertaV2Embeddings {
 
         let dropout = StableDropout::new(config.hidden_dropout_prob);
 
-        // TEMP: Verified
         let position_ids =
             Tensor::arange(0, config.max_position_embeddings as u32, &device)?.unsqueeze(0)?;
 
@@ -205,8 +204,6 @@ impl DebertaV2Embeddings {
         mask: Option<&Tensor>,
         inputs_embeds: Option<&Tensor>,
     ) -> candle::Result<Tensor> {
-        let start = std::time::Instant::now();
-
         let input_shape = match (input_ids, inputs_embeds) {
             (Some(inputids), None) => inputids.dims(),
             (None, Some(inputsembeds)) => inputsembeds.dims(),
@@ -276,13 +273,6 @@ impl DebertaV2Embeddings {
         }
 
         embeddings = self.dropout.forward(Some(&embeddings))?.unwrap();
-
-        let duration = start.elapsed();
-
-        println!(
-            "*** DebertaV2Embeddings finished in {} ms",
-            duration.as_nanos() / 1_000_000,
-        );
 
         Ok(embeddings)
     }
@@ -398,7 +388,6 @@ impl DebertaV2DisentangledSelfAttention {
         Ok(Self {
             config,
             num_attention_heads,
-            // attention_head_size,
             query_proj,
             key_proj,
             value_proj,
@@ -423,8 +412,6 @@ impl DebertaV2DisentangledSelfAttention {
         relative_pos: Option<&Tensor>,
         rel_embeddings: Option<&Tensor>,
     ) -> candle::Result<Tensor> {
-        let start = std::time::Instant::now();
-
         let query_states = match query_states {
             Some(qs) => qs,
             None => hidden_states,
@@ -531,17 +518,10 @@ impl DebertaV2DisentangledSelfAttention {
             }
         };
 
-        let duration = start.elapsed();
-        println!(
-            "****** DebertaV2DisentangledSelfAttention finished in {:.5} ms",
-            duration.as_secs_f64() * 1000.0
-        );
-
         Ok(context_layer)
     }
 
     fn transpose_for_scores(&self, xs: &Tensor) -> candle::Result<Tensor> {
-        let start = std::time::Instant::now();
         let dims = xs.dims().to_vec();
         let result = match dims.len() {
             3 => {
@@ -560,12 +540,6 @@ impl DebertaV2DisentangledSelfAttention {
             ))),
         };
 
-        let duration = start.elapsed();
-        println!(
-            "****** DSA transpose_for_scores finished in {:.5} ms",
-            duration.as_secs_f64() * 1000.0
-        );
-
         result
     }
 
@@ -577,7 +551,6 @@ impl DebertaV2DisentangledSelfAttention {
         rel_embeddings: Tensor,
         scale_factor: usize,
     ) -> candle::Result<Tensor> {
-        let start = std::time::Instant::now();
         let mut relative_pos: Tensor = if relative_pos.is_none() {
             let q = query_layer.dim(D::Minus2)?;
             build_relative_position(
@@ -738,11 +711,6 @@ impl DebertaV2DisentangledSelfAttention {
                 score.broadcast_add(&p2c_att.broadcast_div(&scale.to_dtype(p2c_att.dtype())?)?)?;
         }
 
-        let duration = start.elapsed();
-        println!(
-            "****** DSA disenangled_attention_bias finished in {:.5} ms",
-            duration.as_secs_f64() * 1000.0
-        );
         Ok(score)
     }
 }
@@ -767,8 +735,6 @@ impl DebertaV2Attention {
         relative_pos: Option<&Tensor>,
         rel_embeddings: Option<&Tensor>,
     ) -> candle::Result<Tensor> {
-        let start = std::time::Instant::now();
-
         let self_output = self.dsa.forward(
             hidden_states,
             attention_mask,
@@ -782,16 +748,7 @@ impl DebertaV2Attention {
             query_states = Some(hidden_states)
         }
 
-        let result = self.output.forward(&self_output, query_states.unwrap());
-
-        let duration = start.elapsed();
-
-        println!(
-            "***** DebertaV2Attention finished in {:.5} ms",
-            duration.as_secs_f64() * 1000.0
-        );
-
-        result
+        self.output.forward(&self_output, query_states.unwrap())
     }
 }
 
@@ -826,9 +783,8 @@ impl DebertaV2SelfOutput {
                     "DebertaV2SelfOuput dropout did not return a Tensor".to_string(),
                 ))?;
 
-        Ok(self
-            .layer_norm
-            .forward(&hidden_states.broadcast_add(input_tensor)?)?)
+        self.layer_norm
+            .forward(&hidden_states.broadcast_add(input_tensor)?)
     }
 }
 
@@ -852,9 +808,8 @@ impl DebertaV2Intermediate {
     }
 
     pub fn forward(&self, hidden_states: &Tensor) -> candle::Result<Tensor> {
-        Ok(self
-            .intermediate_act
-            .forward(&self.dense.forward(hidden_states)?)?)
+        self.intermediate_act
+            .forward(&self.dense.forward(hidden_states)?)
     }
 }
 
@@ -926,7 +881,6 @@ impl DebertaV2Layer {
         relative_pos: Option<&Tensor>,
         rel_embeddings: Option<&Tensor>,
     ) -> candle::Result<Tensor> {
-        let start = std::time::Instant::now();
         let attention_output = self.attention.forward(
             hidden_states,
             attention_mask,
@@ -940,13 +894,6 @@ impl DebertaV2Layer {
         let layer_output = self
             .output
             .forward(&intermediate_output, &attention_output)?;
-
-        let duration = start.elapsed();
-
-        println!(
-            "**** DebertaV2Layer finished in {:.5} ms",
-            duration.as_secs_f64() * 1000.0
-        );
 
         Ok(layer_output)
     }
@@ -1024,7 +971,7 @@ pub struct DebertaV2Encoder {
 impl DebertaV2Encoder {
     pub fn load(vb: VarBuilder, config: &Config) -> candle::Result<Self> {
         let layer = (0..config.num_hidden_layers)
-            .map(|index| DebertaV2Layer::load(vb.pp(&format!("layer.{index}")), config))
+            .map(|index| DebertaV2Layer::load(vb.pp(format!("layer.{index}")), config))
             .collect::<candle::Result<Vec<_>>>()?;
 
         let relative_attention = config.relative_attention;
@@ -1093,8 +1040,6 @@ impl DebertaV2Encoder {
         query_states: Option<&Tensor>,
         relative_pos: Option<&Tensor>,
     ) -> candle::Result<Tensor> {
-        let start = std::time::Instant::now();
-
         let input_mask = if attention_mask.dims().len() <= 2 {
             attention_mask.clone()
         } else {
@@ -1141,17 +1086,9 @@ impl DebertaV2Encoder {
             }
         }
 
-        let duration = start.elapsed();
-
-        println!(
-            "*** DebertaV2Encoder finished in {:.5} ms",
-            duration.as_secs_f64() * 1000.0
-        );
-
         Ok(output_states)
     }
 
-    // TEMP: Verified
     fn get_attention_mask(&self, mut attention_mask: Tensor) -> candle::Result<Tensor> {
         if attention_mask.dims().len() <= 2 {
             let extended_attention_mask = attention_mask.unsqueeze(1)?.unsqueeze(2)?;
@@ -1245,8 +1182,6 @@ impl DebertaV2Model {
         token_type_ids: Option<Tensor>,
         attention_mask: Option<Tensor>,
     ) -> candle::Result<Tensor> {
-        let start = std::time::Instant::now();
-
         let input_ids_shape = input_ids.shape();
 
         let attention_mask = match attention_mask {
@@ -1274,13 +1209,6 @@ impl DebertaV2Model {
         if self.z_steps > 1 {
             todo!("Copmlete DebertaV2Model forward() when z_steps > 1")
         }
-
-        let duration = start.elapsed();
-
-        println!(
-            "** DebertaV2Model finished in {:.5} ms",
-            duration.as_secs_f64() * 1000.0
-        );
 
         Ok(encoder_output)
     }
@@ -1335,7 +1263,6 @@ impl DebertaV2NERModel {
         Ok(Self {
             device: vb.device().clone(),
             deberta,
-            // id2label,
             dropout,
             classifier,
         })
@@ -1347,22 +1274,11 @@ impl DebertaV2NERModel {
         token_type_ids: Option<Tensor>,
         attention_mask: Option<Tensor>,
     ) -> candle::Result<Tensor> {
-        let start = std::time::Instant::now();
-
         let output = self
             .deberta
             .forward(input_ids, token_type_ids, attention_mask)?;
         let output = self.dropout.forward(&output, false)?;
-        let result = self.classifier.forward(&output);
-
-        let duration = start.elapsed();
-
-        println!(
-            "* DebertaV2NerModel finished in {:.5} ms",
-            duration.as_secs_f64() * 1000.0
-        );
-
-        result
+        self.classifier.forward(&output)
     }
 }
 
@@ -1373,8 +1289,6 @@ pub(crate) fn build_relative_position(
     bucket_size: Option<isize>,
     max_position: Option<isize>,
 ) -> candle::Result<Tensor> {
-    let start = std::time::Instant::now();
-
     let q_ids = Tensor::arange(0, query_size as i64, device)?.unsqueeze(0)?;
     let k_ids: Tensor = Tensor::arange(0, key_size as i64, device)?.unsqueeze(D::Minus1)?;
     let mut rel_pos_ids = k_ids.broadcast_sub(&q_ids)?;
@@ -1390,12 +1304,6 @@ pub(crate) fn build_relative_position(
     rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
 
     rel_pos_ids = rel_pos_ids.unsqueeze(0)?;
-
-    let duration = start.elapsed();
-    println!(
-        "****** build_relative_position finished in {:.5} ms",
-        duration.as_secs_f64() * 1000.0
-    );
     Ok(rel_pos_ids)
 }
 
@@ -1405,10 +1313,7 @@ pub(crate) fn make_log_bucket_position(
     max_position: isize,
     device: &Device,
 ) -> candle::Result<Tensor> {
-    let sign = relative_pos
-        .to_dtype(DType::F32)?
-        .sign()?
-        .to_dtype(DType::I64)?; // TODO: This cast might be unnecessary
+    let sign = relative_pos.to_dtype(DType::F32)?.sign()?;
 
     let mid = bucket_size / 2;
 
