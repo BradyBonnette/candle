@@ -36,8 +36,6 @@ impl Display for ArgsTask {
     }
 }
 
-// #[derive(Parser, Debug)]
-// #[command(author, version, about, long_about = None)]
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 #[command(group(ArgGroup::new("model")
@@ -138,7 +136,6 @@ impl Args {
         let mut tokenizer = Tokenizer::from_file(tokenizer_filename)
             .map_err(|e| candle::Error::Msg(format!("Tokenizer error: {e}")))?;
         tokenizer.with_padding(Some(PaddingParams::default()));
-        // let tokenizer = SentencePieceProcessor::open(tokenizer_filename)?;
 
         let vb = if self.use_pth {
             VarBuilder::from_pth(
