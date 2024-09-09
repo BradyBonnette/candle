@@ -1300,11 +1300,8 @@ pub(crate) fn build_relative_position(
     }
 
     rel_pos_ids = rel_pos_ids.to_dtype(DType::I64)?;
-
     rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
-
-    rel_pos_ids = rel_pos_ids.unsqueeze(0)?;
-    Ok(rel_pos_ids)
+    Ok(rel_pos_ids.unsqueeze(0)?)
 }
 
 pub(crate) fn make_log_bucket_position(
@@ -1322,20 +1319,19 @@ pub(crate) fn make_log_bucket_position(
 
     let condition = lt_mid
         .to_dtype(candle::DType::F32)?
-        .mul(&gt_neg_mid.to_dtype(candle::DType::F32)?)?;
+        .mul(&gt_neg_mid.to_dtype(candle::DType::F32)?)?
+        .to_dtype(DType::U8)?;
 
-    let condition_bool = condition.to_dtype(DType::U8)?;
-
-    let on_true = Tensor::new(&[(mid - 1) as u32], device)?.broadcast_as(relative_pos.shape())?;
-
-    let on_true = on_true.to_dtype(relative_pos.dtype())?;
+    let on_true = Tensor::new(&[(mid - 1) as u32], device)?
+        .broadcast_as(relative_pos.shape())?
+        .to_dtype(relative_pos.dtype())?;
 
     let on_false = relative_pos
         .to_dtype(DType::F32)?
         .abs()?
         .to_dtype(DType::I64)?;
 
-    let abs_pos = condition_bool.where_cond(&on_true, &on_false)?;
+    let abs_pos = condition.where_cond(&on_true, &on_false)?;
 
     let mid_as_tensor = Tensor::from_slice(&[mid as f32], (1,), device)?;
 
@@ -1359,11 +1355,10 @@ pub(crate) fn make_log_bucket_position(
         ceil.broadcast_add(&mid_as_tensor)?
     };
 
-    let bucket_pos = {
+    Ok({
         let abs_pos_lte_mid = abs_pos.to_dtype(DType::F32)?.broadcast_le(&mid_as_tensor)?;
         let relative_pos = relative_pos.to_dtype(relative_pos.dtype())?;
         let log_pos_mul_sign = log_pos.broadcast_mul(&sign.to_dtype(DType::F32)?)?;
         abs_pos_lte_mid.where_cond(&relative_pos.to_dtype(DType::F32)?, &log_pos_mul_sign)?
-    };
-    Ok(bucket_pos)
+    })
 }
