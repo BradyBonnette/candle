@@ -18,7 +18,7 @@ use clap::{ArgGroup, Parser, ValueEnum};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use tokenizers::{Encoding, PaddingParams, Tokenizer};
 
-enum DebertaV2ModelType {
+enum TaskType {
     NER(DebertaV2NERModel),
 }
 
@@ -87,7 +87,7 @@ impl Args {
     fn build_model_and_tokenizer(
         &self,
         id2label: Option<Id2Label>,
-    ) -> Result<(DebertaV2ModelType, DebertaV2Config, Tokenizer)> {
+    ) -> Result<(TaskType, DebertaV2Config, Tokenizer)> {
         let device = candle_examples::device(self.cpu)?;
 
         // Get files from either the HuggingFace API, or from a specified local directory.
@@ -162,7 +162,7 @@ impl Args {
 
         match self.task {
             ArgsTask::NER => Ok((
-                DebertaV2ModelType::NER(DebertaV2NERModel::load(vb, &config, id2label)?),
+                TaskType::NER(DebertaV2NERModel::load(vb, &config, id2label)?),
                 config,
                 tokenizer,
             )),
@@ -170,9 +170,9 @@ impl Args {
     }
 }
 
-fn get_device(model_type: &DebertaV2ModelType) -> &Device {
+fn get_device(model_type: &TaskType) -> &Device {
     match model_type {
-        DebertaV2ModelType::NER(ner_model) => &ner_model.device,
+        TaskType::NER(ner_model) => &ner_model.device,
     }
 }
 
@@ -208,13 +208,13 @@ fn main() -> Result<()> {
     };
 
     let model_load_time = std::time::Instant::now();
-    let (model_type, model_config, tokenizer) = args.build_model_and_tokenizer(None)?;
+    let (task_type, model_config, tokenizer) = args.build_model_and_tokenizer(None)?;
     println!(
         "Loaded model and tokenizers in {:?}",
         model_load_time.elapsed()
     );
 
-    let device = get_device(&model_type);
+    let device = get_device(&task_type);
 
     // Single sentence passed in means we don't need batching.
     // Multiple sentences passed in means we have can/should do batching.
@@ -262,8 +262,8 @@ fn main() -> Result<()> {
         tokenize_time.elapsed()
     );
 
-    match model_type {
-        DebertaV2ModelType::NER(ner_model) => {
+    match task_type {
+        TaskType::NER(ner_model) => {
             if let Some(num_iters) = args.benchmark_iters {
                 create_benchmark(num_iters, model_input)(
                     |input_ids, token_type_ids, attention_mask| {
