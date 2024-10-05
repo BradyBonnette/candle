@@ -70,9 +70,6 @@ struct Args {
     #[arg(long)]
     benchmark_iters: Option<usize>,
 
-    // /// Use tanh based approximation for Gelu instead of erf implementation.
-    // #[arg(long, default_value = "false")]
-    // approximate_gelu: bool,
     /// Which task to run
     #[arg(long, default_value_t = ArgsTask::NER)]
     task: ArgsTask,
@@ -154,11 +151,6 @@ impl Args {
         };
 
         let vb = vb.set_prefix("deberta");
-
-        // TODO: Should we?
-        // if self.approximate_gelu {
-        //     config.hidden_act = HiddenAct::GeluApproximate;
-        // }
 
         match self.task {
             ArgsTask::NER => Ok((
@@ -267,12 +259,10 @@ fn main() -> Result<()> {
             if let Some(num_iters) = args.benchmark_iters {
                 create_benchmark(num_iters, model_input)(
                     |input_ids, token_type_ids, attention_mask| {
-                        ner_model
-                            .forward(input_ids, Some(token_type_ids), Some(attention_mask))
-                            .expect("ohno");
+                        ner_model.forward(input_ids, Some(token_type_ids), Some(attention_mask))?;
                         Ok(())
                     },
-                );
+                )?;
 
                 std::process::exit(0);
             }
@@ -334,11 +324,8 @@ fn main() -> Result<()> {
                         let sum = shifted_exp.sum_keepdim(D::Minus1)?;
                         shifted_exp.broadcast_div(&sum)?
                     };
-
                     let max_scores = scores.max(D::Minus1)?.to_vec2::<f32>()?;
-
                     let batch_scores = scores.argmax_keepdim(2)?.to_vec3::<u32>()?;
-
                     let mut batch_results: Vec<Vec<NERItem>> = Vec::default();
 
                     for (batch_idx, batch_score) in batch_scores.iter().enumerate() {
@@ -375,18 +362,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn create_benchmark<F>(num_iters: usize, model_input: ModelInput) -> impl Fn(F) -> ()
+fn create_benchmark<F>(
+    num_iters: usize,
+    model_input: ModelInput,
+) -> impl Fn(F) -> Result<(), candle::Error>
 where
     F: Fn(&Tensor, Tensor, Tensor) -> Result<(), candle::Error>,
 {
-    move |code: F| -> () {
+    move |code: F| -> Result<(), candle::Error> {
         println!("Running {num_iters} iterations...");
         let mut durations = Vec::with_capacity(num_iters);
         for _ in 0..num_iters {
             let token_type_ids = model_input.token_type_ids.clone();
             let attention_mask = model_input.attention_mask.clone();
             let start = std::time::Instant::now();
-            code(&model_input.input_ids, token_type_ids, attention_mask).expect("ohno");
+            code(&model_input.input_ids, token_type_ids, attention_mask)?;
             let duration = start.elapsed();
             durations.push(duration.as_nanos());
         }
@@ -398,5 +388,6 @@ where
         println!("Min time: {:.3} ms", min_time as f64 / 1_000_000.0);
         println!("Avg time: {:.3} ms", avg_time / 1_000_000.0);
         println!("Max time: {:.3} ms", max_time as f64 / 1_000_000.0);
+        Ok(())
     }
 }
