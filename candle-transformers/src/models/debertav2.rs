@@ -118,6 +118,7 @@ impl StableDropout {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L823
 pub struct DebertaV2Embeddings {
     device: Device,
     word_embeddings: Embedding,
@@ -278,6 +279,7 @@ impl DebertaV2Embeddings {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L72
 struct XSoftmax {}
 
 impl XSoftmax {
@@ -301,6 +303,7 @@ impl XSoftmax {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L605
 pub struct DebertaV2DisentangledSelfAttention {
     config: Config,
     num_attention_heads: usize,
@@ -715,6 +718,7 @@ impl DebertaV2DisentangledSelfAttention {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L270
 pub struct DebertaV2Attention {
     dsa: DebertaV2DisentangledSelfAttention,
     output: DebertaV2SelfOutput,
@@ -752,6 +756,7 @@ impl DebertaV2Attention {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L255
 pub struct DebertaV2SelfOutput {
     dense: candle_nn::Linear,
     layer_norm: LayerNorm,
@@ -788,6 +793,7 @@ impl DebertaV2SelfOutput {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L307
 pub struct DebertaV2Intermediate {
     dense: candle_nn::Linear,
     intermediate_act: HiddenActLayer,
@@ -813,6 +819,7 @@ impl DebertaV2Intermediate {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L323
 pub struct DebertaV2Output {
     dense: candle_nn::Linear,
     layer_norm: LayerNorm,
@@ -855,6 +862,7 @@ impl DebertaV2Output {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L339
 pub struct DebertaV2Layer {
     attention: DebertaV2Attention,
     intermediate: DebertaV2Intermediate,
@@ -900,6 +908,7 @@ impl DebertaV2Layer {
 }
 
 // TODO: In order to fully test ConvLayer a model needs to be found has a configuration where `conv_kernel_size` exists and is > 0
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L373
 pub struct ConvLayer {
     _conv_act: String,
     _conv: Conv1d,
@@ -956,6 +965,7 @@ impl ConvLayer {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L409
 pub struct DebertaV2Encoder {
     layer: Vec<DebertaV2Layer>,
     relative_attention: bool,
@@ -1154,6 +1164,7 @@ impl DebertaV2Encoder {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L991
 pub struct DebertaV2Model {
     embeddings: DebertaV2Embeddings,
     encoder: DebertaV2Encoder,
@@ -1212,14 +1223,6 @@ impl DebertaV2Model {
 
         Ok(encoder_output)
     }
-}
-
-#[derive(Debug)]
-pub struct SentencePiece {
-    pub piece: String,
-    pub id: u32,
-    pub span: (u32, u32),
-    pub is_special: bool,
 }
 
 #[derive(Debug)]
@@ -1282,6 +1285,7 @@ impl DebertaV2NERModel {
     }
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L557
 pub(crate) fn build_relative_position(
     query_size: usize,
     key_size: usize,
@@ -1301,9 +1305,10 @@ pub(crate) fn build_relative_position(
 
     rel_pos_ids = rel_pos_ids.to_dtype(DType::I64)?;
     rel_pos_ids = rel_pos_ids.narrow(0, 0, query_size)?;
-    Ok(rel_pos_ids.unsqueeze(0)?)
+    rel_pos_ids.unsqueeze(0)
 }
 
+// https://github.com/huggingface/transformers/blob/78b2929c0554b79e0489b451ce4ece14d265ead2/src/transformers/models/deberta_v2/modeling_deberta_v2.py#L542
 pub(crate) fn make_log_bucket_position(
     relative_pos: Tensor,
     bucket_size: isize,
